@@ -31,11 +31,35 @@ Fixes are very welcome, and they ship on the main Workshop item with your name o
 
 ## Credits
 
-- The original **KCM** multiplayer mod (Workshop 3105755541), which this continues with its
-  author's permission.
-- **Bill Kerman**, whose community patch contributed a large share of 0.14.0: guest save loading,
-  treasuries, harvests, the save transfer, dragons, export prices and diplomacy popups.
-- **[RiptideNetworking](https://github.com/RiptideNetworking/Riptide)** by Tom Weiland, MIT
-  licensed, see [LICENSE.md](LICENSE.md).
+Created and maintained by **BrassyCrane**.
 
-Maintained by BrassyCrane.
+**Bill Kerman** found and fixed, in his community patch (merged in 0.14.0):
+
+- farms never harvesting (a destroyed cave container made every autosave fail, which stopped the
+  season change reaching the farms)
+- other players' kingdoms having no gold capacity, so gold stayed at zero and merchant orders
+  snapped back to 0
+- every island being staffed by the local player's job settings
+- buildings finished on another player's machine never being fully set up
+- per-island records sized before the map existed, which left buildings, keeps included, missing
+  from their island
+- guests joining a loaded save: being given a new kingdom, being asked to place a castle again,
+  the load stopping half way, and starting out looking at the host's castle
+- the save transfer stalling while the host is paused, and a guest disconnecting itself during a
+  large transfer; he also rebuilt the transfer to request chunks in windows
+- kingdoms loading without their buildings and drawn in pink
+- the old game staying live behind the main menu, and a previous save's town left on a new map
+- AI kingdoms appearing in multiplayer games
+- a reconnecting player being given a different team
+- wolf packs growing differently on each machine
+- the world ticking once per kingdom instead of once per frame
+- a raid error being able to freeze the world clock (he contains the error; its cause is still unknown)
+- loaded games reverting to Peaceful difficulty
+
+He also added dragon flight sync, alliance requests that need both sides to agree, two seasons'
+notice for war, demands and offers between kingdoms, the diplomacy popups, per-kingdom export
+prices, and the merchant arrival banner for other players' ships.
+
+Networking uses **[RiptideNetworking](https://github.com/RiptideNetworking/Riptide)** by Tom
+Weiland, under the MIT licence, which requires its notice to ship with it; see
+[LICENSE.md](LICENSE.md).

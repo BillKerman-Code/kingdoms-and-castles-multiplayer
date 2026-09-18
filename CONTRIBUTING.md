@@ -25,9 +25,10 @@ Workshop item with credit to you, in the change notes and in the Git history.
 
 ## Rights
 
-This mod is not open-source licensed: its code is © its authors, all rights reserved, and the parts
-from the original KCM mod remain its author's. You are welcome to read it, fork it on GitHub to
-prepare a pull request, and run it for your own games.
+This mod is not open-source licensed: its code is © its authors, all rights reserved. The bundled
+RiptideNetworking library is the one exception and keeps its own MIT licence (see LICENSE.md). You
+are welcome to read the code, fork it on GitHub to prepare a pull request, and run it for your own
+games.
 
 By opening a pull request you agree that your contribution may be included in this mod and
 distributed with it under these same terms, with credit to you.
