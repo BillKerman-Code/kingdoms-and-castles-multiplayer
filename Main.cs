@@ -57,7 +57,17 @@ namespace KaCMultiplayer
         {
             try
             {
-                if (!HasLaunchFlag("-kcmdev")) return;   // the master switch; nothing else applies without it
+                // -kcmmerchantlog stands OUTSIDE the -kcmdev master switch on purpose: it is pure
+                // Main.helper.Log output with no gameplay side effect (see LogMerchantPathing's
+                // own doc comment), unlike everything -kcmdev gates, so it is safe to turn on for
+                // a real session with real players -- exactly the point of splitting it out.
+                if (HasLaunchFlag("-kcmmerchantlog"))
+                {
+                    LogMerchantPathing = true;
+                    helper.Log("[DEV] launch flag -kcmmerchantlog: LogMerchantPathing=true (standalone, no -kcmdev needed)");
+                }
+
+                if (!HasLaunchFlag("-kcmdev")) return;   // the master switch; nothing else below applies without it
 
                 DevTestBuild = true;
 
@@ -139,6 +149,20 @@ namespace KaCMultiplayer
         public static bool DevTestBuild = false;
 
         /// <summary>
+        /// Dumps a merchant ship's full pathing/arrival state (see LogMerchantTransit) once every
+        /// couple of seconds per ship, only while it has not yet reached its dock. Was bundled
+        /// under DevTestBuild before this; split out because it is pure Main.helper.Log output
+        /// with no gameplay side effect at all, unlike everything else that switch controls (its
+        /// own doc comment: "every action you take applies twice and a player could summon a
+        /// second kingdom with a keypress") -- so a player chasing a specific "merchant never
+        /// docks" report can turn ONLY this on for one test session without any of that risk.
+        ///
+        /// Off by default, same reasoning as DevTestBuild: this is a temp diagnostic (see its own
+        /// TEMP DIAGNOSTIC comments below), not something a normal session should be logging.
+        /// </summary>
+        public static bool LogMerchantPathing = false;
+
+        /// <summary>
         /// Whether one machine arbitrates each fight instead of every machine resolving damage for
         /// itself. See Combat/CombatRule.cs for the model.
         ///
@@ -184,16 +208,21 @@ namespace KaCMultiplayer
         /// rather than more reading. This flag exists so that run can happen without shipping the
         /// freeze to anybody.
         ///
-        /// ON NOW, 2026-09-15, and the reason it is safe to try is that the stall can no longer
-        /// be silent OR fatal. Weather.Update's call to RaiderSystem.OnNewYear is wrapped by
-        /// WeatherUpdateRaidGuardHook, so a throw there costs one year's raid and writes a full
-        /// stack trace instead of wedging the world clock. The "no exception was ever thrown"
-        /// finding above was almost certainly output.txt being read rather than Player.log, the
-        /// same blind spot that hid the cave-container bug and stopped every farm in the game
-        /// from harvesting.
+        /// WAS ON from 2026-09-15, on the theory that the stall could no longer be silent OR
+        /// fatal: Weather.Update's call to RaiderSystem.OnNewYear is wrapped by
+        /// WeatherUpdateRaidGuardHook, so a THROW there costs one year's raid and writes a full
+        /// stack trace instead of wedging the world clock.
         ///
-        /// Turn back off here, or leave it off for a release, if a session shows raids doing
-        /// something worse than throwing.
+        /// TURNED BACK OFF 2026-09-17: a live session found the "something worse than throwing"
+        /// this comment warned about. Vikings landed, destroyed several buildings (so the raid
+        /// itself ran and the guard hook was never even hit, meaning it did not throw), and then
+        /// the boat sat at the shore with its troops never disembarking, at the same time a large
+        /// share of the kingdom's own villagers went idle despite open jobs. That is a stall, not
+        /// an exception, so WeatherUpdateRaidGuardHook's try/catch never had anything to catch --
+        /// exactly the "no exception was ever thrown" symptom from the original 2026-09-15 finding,
+        /// reproduced with the safety net in place. Consistent with the original theory that the
+        /// raid sim cannot resolve a target across multiple team-owned landmasses, it just hangs
+        /// mid-resolution instead of crashing.
         /// </summary>
         public static bool RaidsEnabled = true;
 
@@ -542,6 +571,99 @@ namespace KaCMultiplayer
             }
         }
 
+        // ---- WHO GETS TO DECIDE WHO BUILDS WHAT --------------------------------------------
+        //
+        // Job.UpdateAssignment is vanilla's ONE decision point for "which idle villager takes
+        // this job" (checked against the shipped IL: it is the only method anywhere that calls
+        // Job.AssignEmployee). Neither Assets.Code.Jobs.BuilderJob nor Assets.Code.Jobs
+        // .GuildBuilderJob -- the two Job subclasses a building under construction actually uses,
+        // an ordinary site's own BuilderJob and the Builders' Guild's roaming GuildBuilderJob --
+        // override it, and a full scan of every type in the assembly turned up no other override
+        // either, so this single inherited method is exactly as authoritative for "who builds
+        // this" as it is for "who farms this" or "who cuts this tree".
+        //
+        // JobSystem.Update calls it from a loop that, like Player.Update, walks EVERY landmass in
+        // the world every frame -- bounded by Player.inst.JobPriorityOrder.Length, the very read
+        // PlayerJobPriorityOrderHook above already exists to correct -- and for every open job on
+        // every one of them searches World.GetVillagersForLandMass(job.employer.LandMass()) for
+        // the best idle candidate and calls AssignEmployee on it. Nothing in that loop asks whose
+        // landmass it is before deciding; it runs identically for the local kingdom and for every
+        // foreign one, on every machine. That is the exact gap BarracksTickForeignHook closes for
+        // Barracks.Tick and PlayerUpdatePersonArrivalForeignHook closes for SetHome, just reached
+        // through JobSystem instead of through Player.Update.
+        //
+        // Unlike a home, there is no "SetHome broadcast" for a job assignment anywhere in this
+        // codebase (checked: no hook exists on Job.AssignEmployee, Job.OnEmployeeAssigned or
+        // Villager.QuitJob), so an employee is PURELY a local decision with no cross-machine
+        // reconciliation of any kind. On its own that would be harmless for the machines merely
+        // watching a foreign kingdom: BuildingWatcher.Poll already refuses to report anyone's
+        // buildings but the local player's own, so every OTHER machine's constructionProgress for
+        // that building arrives instead as a BuildSnapshotMessage FROM its owner, and an
+        // observer's own guess at who is building it never reaches the wire and never overwrites
+        // anything real.
+        //
+        // It stops being harmless the moment a machine that is NOT that kingdom's owner is also
+        // the machine that has to PACK that kingdom's state -- which is exactly what a rejoin
+        // does. The reconnecting player's own kingdom sat "foreign" on every machine that stayed
+        // connected while they were gone (the disconnected-owner window is the same isGhost case
+        // PlayerUpdateFreezeHook already freezes Player.Update for, but JobSystem is a completely
+        // separate global system that freeze never reaches), so every other machine spent that
+        // whole window independently racing to decide who builds what on the departed player's
+        // own unfinished buildings. Whichever machine ends up serving the resend hands back ITS
+        // OWN raced, uncoordinated guess at who was building what, not the kingdom's own
+        // last-known-good state. Job.JobSaveData<T,S>.Unpack (verified via IL) then faithfully
+        // restores exactly that guess, resolving the packed employee guid through
+        // Player.inst.GetWorker -- which this mod's own RestoreAbsentPlayer already aims at the
+        // right kingdom before that runs, so the RESTORE step is not the bug. It is simply
+        // scrupulously honest about restoring whatever the pack step handed it, race included.
+        // That is "after rejoining, builders bug out and sometimes forget to finish stuff": the
+        // villager who comes back holding (or not holding) a construction job is whichever one
+        // last won a race that should never have run anywhere but the kingdom's own machine.
+        //
+        // No orphan-reconciliation companion (the EnsureNoOrphanedHomelessVillagers half of the
+        // housing fix) is needed here. That gap existed because Home's own save data never named
+        // a resident at all -- occupancy was ENTIRELY a side effect of a live mirror this mod
+        // itself kept, and a dropped guid was invisible to everything, forever. A job's save data
+        // is not like that: Job.JobSaveData`2 (verified via IL, nested under Job and used by both
+        // BuilderJob's own BuilderJobSaveData and the generic GenericJobSaveData every other job
+        // type falls back to) carries the employee's guid directly, packed straight off
+        // Job.employee with no intermediate mirror to go stale, and Unpack already resolves it
+        // against the correct kingdom. Closing the race at its source is therefore sufficient;
+        // there is no silent, save-format-level information loss left to reconcile afterward.
+        [HarmonyPatch(typeof(Job), "UpdateAssignment")]
+        public class JobUpdateAssignmentForeignHook
+        {
+            // Same reasoning as BarracksTickForeignHook's own flag: this sits on a per-job,
+            // per-tick path (every open job in the world, every frame), so an unguarded log here
+            // is a line per job per tick.
+            private static bool warnedGateFailure;
+
+            public static bool Prefix(Job __instance)
+            {
+                if (!NetClient.client.IsConnected) return true; // single-player: the game's own path
+                try
+                {
+                    IEmployer employer = __instance.employer;
+                    if (employer == null) return true;
+
+                    // Same ownership question BarracksTickForeignHook asks of a Building, asked
+                    // here of the job's employer's landmass instead: unowned/neutral (no
+                    // LandmassOwner yet, e.g. a keep placement still in flight) ticks everywhere.
+                    // An AI kingdom's jobs are the host's to fill; see Main.IsForeignTeam.
+                    if (Main.IsForeignLandmass(employer.LandMass())) return false; // not ours to decide
+                }
+                catch (Exception e)
+                {
+                    if (!warnedGateFailure)
+                    {
+                        warnedGateFailure = true;
+                        Main.LogEx("job assignment ownership gate (further occurrences suppressed)", e);
+                    }
+                }
+                return true;
+            }
+        }
+
         // Team ids already warned about, so an orphaned kingdom doesn't log once per frame
         // forever. A miss is persistent by nature, the owner has left, so the first report is
         // the informative one and the rest are noise.
@@ -608,6 +730,42 @@ namespace KaCMultiplayer
                             (building.UniqueName ?? "<unnamed>") + "': " + e.Message);
                 return Player.inst;
             }
+        }
+
+        /// <summary>
+        /// True for a kingdom this machine must not make decisions for -- who moves in, who works
+        /// where, what a barracks trains -- because another machine makes them and broadcasts the
+        /// result: another player's kingdom (only their own machine decides for it), or, on a
+        /// guest, an AI kingdom (the host runs those). Teams 0 and 1, the game's neutral and
+        /// raider teams, belong to nobody and run everywhere.
+        ///
+        /// AI kingdoms were "run everywhere" too until guests could see them. A guest has no AI
+        /// buildings to act on, so it did not matter; once AiMirror gave guests the AI's houses and
+        /// fields, a guest's own game started moving its people into AI houses and putting them to
+        /// work on AI jobs -- as that guest's villagers, broadcast to everyone -- while the host ran
+        /// the same islands. Two machines running one kingdom: frozen villagers, and starvation.
+        /// </summary>
+        public static bool IsForeignTeam(int team)
+        {
+            if (team >= KaCMultiplayer.Net.PlayerRelations.MpTeamBase)
+            {
+                int localTeam = (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
+                    ? Player.inst.PlayerLandmassOwner.teamId : int.MinValue;
+                return team != localTeam;
+            }
+
+            if (team >= KaCMultiplayer.Net.AiDiplomacy.FirstAiTeam && team <= KaCMultiplayer.Net.AiDiplomacy.LastAiTeam)
+                return !NetRouter.IsServer;
+
+            return false;
+        }
+
+        /// <summary><see cref="IsForeignTeam"/> for whoever owns a landmass. Unowned land is nobody's.</summary>
+        public static bool IsForeignLandmass(int landMass)
+        {
+            if (landMass < 0) return false;
+            LandmassOwner owner = World.GetLandmassOwner(landMass);
+            return owner != null && IsForeignTeam(owner.teamId);
         }
 
         // "Is this the LOCAL player's building?", the MP-correct replacement for vanilla's
@@ -821,6 +979,9 @@ namespace KaCMultiplayer
             // See Combat/DragonFlightSync.cs.
             KaCMultiplayer.Combat.DragonFlightSync.Tick();
 
+            // The host runs Viking movement; guests receive the same transport positions.
+            KaCMultiplayer.Net.RaiderSync.Tick();
+
             // Counts declared wars down to the season they begin. See PlayerRelations.
             TickSeasonWatchers();
 
@@ -830,9 +991,42 @@ namespace KaCMultiplayer
             // landmass and does nothing at all once the wiring is right.
             if (FixedUpdateInterval % 60 == 0) AliasJobTablesToOwners();
 
+            // Same reasoning, for homes that fell out of their landmass's registry before this
+            // machine had the map wide enough to hold them: see EnsureResidentialsRegistryComplete.
+            //
+            // Runs EnsureNoOrphanedHomelessVillagers in the same pass, for the same triggers (a
+            // reload above all): a villager dropped from a Home's packed resident list comes back
+            // with no home AND no Homeless entry, so nothing about that kingdom's registries looks
+            // wrong, only its population does. See that method for the mechanism.
+            //
+            // RecoverStrandedVillagerPaths rides along too: same cadence, same per-kingdom loop,
+            // and the thing it repairs (a villager whose pathfinding request never came back) is
+            // just as invisible to every other check as an orphaned homeless villager is. See that
+            // method for the 2026-09-20 heartbeat freeze this exists for.
+            if (FixedUpdateInterval % 60 == 0 && NetClient.client.IsConnected && Player.inst != null)
+            {
+                EnsureResidentialsRegistryComplete(Player.inst);
+                EnsureNoOrphanedHomelessVillagers(Player.inst);
+                RecoverStrandedVillagerPaths(Player.inst);
+                foreach (SessionPlayer kp in kCPlayers.Values)
+                    if (kp != null && kp.inst != null && kp.inst != Player.inst)
+                    {
+                        EnsureResidentialsRegistryComplete(kp.inst);
+                        EnsureNoOrphanedHomelessVillagers(kp.inst);
+                        RecoverStrandedVillagerPaths(kp.inst);
+                    }
+            }
+
             // Keep streamer effects the same on every machine. Silent, and free, unless somebody
             // is actually running them. See Net/StreamerEffectSync.cs.
             KaCMultiplayer.Net.StreamerEffectSync.Tick();
+            KaCMultiplayer.Net.DragonAlerts.Tick();
+            // The host packs its mirror of a guest when that guest reconnects. Keep that mirror's
+            // totals live so reconnect cannot replace the guest's economy with stale zeroes.
+            if (NetClient.client.IsConnected && FixedUpdateInterval % 50 == 0)
+                BroadcastOwnResources();
+            KaCMultiplayer.Net.StorageSync.Tick();
+            KaCMultiplayer.LoadSaveOverrides.PostLoadVisualRepair.Tick();
 
             // Repaint every flag in the world if somebody's colours or somebody's ground changed.
             // Coalesced, so a burst of building placements costs one repaint, not one each.
@@ -887,6 +1081,9 @@ namespace KaCMultiplayer
             _loggedMerchantArrivals.Clear();
             _loggedFrozenKingdoms.Clear();
             PlayerRelations.Reset();
+            KaCMultiplayer.Net.StorageSync.Reset();
+            KaCMultiplayer.Net.RaiderSync.Reset();
+            KaCMultiplayer.LoadSaveOverrides.PostLoadVisualRepair.Reset();
         }
 
         // Cross-player merchant trade, Phase 1: opens trade docks between the LOCAL player and every
@@ -955,6 +1152,77 @@ namespace KaCMultiplayer
             catch (Exception e) { helper.Log("[RELATIONS] request error: " + e.Message); }
         }
 
+        /// <summary>
+        /// Host-only: sets a relation between two teams directly, no proposal/consent round trip.
+        ///
+        /// For companion addons that need to establish standings BEFORE normal play begins (e.g.
+        /// a team-selector mod grouping players into 2v1/3v1/2v2 at session start) rather than one
+        /// player proposing a change to another during a game already in progress. Reuses the same
+        /// Sync=true reasoning SendRelationsTo already uses to tell a late joiner "here's who's at
+        /// war with whom": an existing standing being STATED, not a fresh offer somebody has to
+        /// accept, so it needs no PlayerRelations.RequestFrom negotiation. Unlike
+        /// RequestRelationChange, which only lets a player change ITS OWN team's standing and
+        /// applies nowhere until the message round-trips back through the host, this applies
+        /// locally AND broadcasts in one call, and the pair need not include the caller's team at
+        /// all -- PlayerRelations.Set validates the pair itself (IsPlayerPair), not this method.
+        ///
+        /// No-op for anyone but the host. NetRouter.Broadcast already no-ops silently off-host, but
+        /// the local PlayerRelations.Set below would not, so IsServer is checked explicitly rather
+        /// than relying on that.
+        /// </summary>
+        public static void HostPresetRelation(int teamA, int teamB, World.Relations relation)
+        {
+            try
+            {
+                if (!NetRouter.IsServer) return;
+
+                PlayerRelations.Set(teamA, teamB, relation);
+                NetRouter.Broadcast(new KaCMultiplayer.Net.Messages.PlayerRelationMessage
+                {
+                    TeamA = teamA,
+                    TeamB = teamB,
+                    Relation = (int)relation,
+                    Sync = true
+                });
+
+                helper.Log($"[RELATIONS] host preset team {teamA} <-> team {teamB} = {relation}");
+            }
+            catch (Exception e) { helper.Log("[RELATIONS] host preset error: " + e.Message); }
+        }
+
+        /// <summary>
+        /// This build's version, sent in the handshake so a guest on a different build is told
+        /// rather than left to find out through messages its copy reads differently.
+        ///
+        /// KEEP IN STEP WITH info.json: the deploy bumps both. A constant, not read from info.json,
+        /// because the game's mod scanner rejects file access from here (File.ReadAllText,
+        /// Path.Combine and even File.ReadAllBytes were all refused as "illegal namespace reference
+        /// to System.IO"), and one refusal fails the whole mod at launch.
+        /// </summary>
+        public const string BuildVersion = "0.13.62";
+
+        public static string ModVersion { get { return BuildVersion; } }
+
+        /// <summary>
+        /// For companion mods: sends <paramref name="payload"/> on <paramref name="channel"/> to
+        /// every other machine in the session. False when there is no session. See
+        /// KaCMultiplayer.Net.AddonChannel.
+        /// </summary>
+        public static bool AddonSend(string channel, string payload)
+        {
+            return KaCMultiplayer.Net.AddonChannel.Send(channel, payload);
+        }
+
+        /// <summary>
+        /// For companion mods: calls <paramref name="handler"/>(senderTeam, fromHost, payload) for
+        /// every message another machine sends on <paramref name="channel"/>. Register once; it
+        /// lasts across sessions. See KaCMultiplayer.Net.AddonChannel.
+        /// </summary>
+        public static void AddonListen(string channel, Action<int, bool, string> handler)
+        {
+            KaCMultiplayer.Net.AddonChannel.Listen(channel, handler);
+        }
+
         private static System.Reflection.FieldInfo _cmoField;
 
         // Force the "Control AI Troops" creative option ON in MP by writing its backing array element
@@ -985,6 +1253,17 @@ namespace KaCMultiplayer
 
         private void Update()
         {
+            // First, before anything reads Player.inst: undo a raid-planner rotation that an
+            // exception left behind (see RaiderOnNewYearAuthorityHook).
+            RestoreRaidPlayerIfStranded();
+
+            // Host: AI kingdoms wait for every player's keep (see AIKingdomPlacementHook).
+            TickPendingAiPlacement();
+
+            // Every guest's calendar kept on the host's (see Net/ClockSync.cs).
+            try { KaCMultiplayer.Net.ClockSync.Tick(); }
+            catch (Exception e) { LogEx("clock sync", e); }
+
             // Here rather than in FixedUpdate: a joiner is sent the world while the host is PAUSED,
             // and FixedUpdate does not run while it is. Paced off unscaled time inside, so the rate
             // on the wire is the same as it was on the fixed tick.
@@ -1064,6 +1343,8 @@ namespace KaCMultiplayer
                 && (Input.GetKey(KeyCode.LeftShift) || Input.GetKey(KeyCode.RightShift))
                 && Input.GetKeyDown(KeyCode.D))
             {
+                if (!NetRouter.IsServer)
+                    NetRouter.Send(new KaCMultiplayer.Net.Messages.DiplomacyRefreshRequestMessage());
                 KaCMultiplayer.Lobby.DiplomacyWindow.Toggle();
             }
 
@@ -1091,6 +1372,8 @@ namespace KaCMultiplayer
             // Escape-to-close and the periodic refresh, so a relation someone else changed shows
             // without the player reopening the window.
             KaCMultiplayer.Lobby.DiplomacyWindow.Tick();
+            KaCMultiplayer.Net.AiDiplomacy.Tick();
+            KaCMultiplayer.Net.PlayerRelations.Tick();
             KaCMultiplayer.Lobby.AllianceRequestWindow.Tick();
 
             KaCMultiplayer.Lobby.DealRequestWindow.Tick();
@@ -1355,13 +1638,15 @@ namespace KaCMultiplayer
                 if (!kCPlayers.TryGetValue(PlayerSteamID, out me) || me == null || me.inst == null) return;
 
                 Assets.Code.ResourceAmount r = me.inst.resourcesTotal;
+                LandmassOwner owner = me.inst.PlayerLandmassOwner;
                 KaCMultiplayer.Net.NetRouter.Send(new KaCMultiplayer.Net.Messages.EconomySnapshotMessage
                 {
                     Wheat = r.Get(FreeResourceType.Wheat),
                     Tree = r.Get(FreeResourceType.Tree),
                     Stone = r.Get(FreeResourceType.Stone),
                     Charcoal = r.Get(FreeResourceType.Charcoal),
-                    Gold = r.Get(FreeResourceType.Gold),
+                    // Gold is stored directly on the kingdom owner, not in warehouse totals.
+                    Gold = owner != null ? owner.Gold : 0,
                     Iron = r.Get(FreeResourceType.IronOre),
                     Tools = r.Get(FreeResourceType.Tools),
                     Armament = r.Get(FreeResourceType.Armament),
@@ -1457,6 +1742,73 @@ namespace KaCMultiplayer
         }
 
         /// <summary>
+        /// True once this machine has actually left the lobby menus and entered a running
+        /// session, false while still in any menu screen. Set in the one place that already
+        /// decides this authoritatively (TransitionTo, below) rather than left for anything else
+        /// to infer.
+        ///
+        /// Exists specifically so a companion addon (KaC Mod Gate, which builds UI anchored to
+        /// the lobby screen and needs to know when to hide it again) has a real, intentional
+        /// signal to read instead of reverse-engineering this mod's own internal state through
+        /// reflection. That reverse-engineering was tried first, repeatedly, and each attempt
+        /// (GameState.IsPlayMode -- a reference comparison that never becomes true in
+        /// multiplayer; the lobby screen's own activeInHierarchy -- true for the host through an
+        /// entire running game, exactly the host-side gap fixed below; SpeedControlUI.inst --
+        /// works, but a base-game singleton this mod does not own is not a contract, just an
+        /// implementation detail that happens to hold today) turned out fragile or wrong in a way
+        /// that took real effort each time to even notice. Public and named for what it means is
+        /// cheaper for every future addon than that same rediscovery, repeated.
+        /// </summary>
+        public static bool IsSessionRunning { get; private set; }
+
+        /// <summary>
+        /// True from the moment this machine enters a session's world until it goes back to the
+        /// lobby, the server browser or the main menu, or the connection goes. Unlike
+        /// <see cref="IsSessionRunning"/>, it STAYS true while the game's own ESC menu, save,
+        /// load or settings screen is open.
+        ///
+        /// That difference was the "rejoin restarts the guest on a new map" report. The host chose
+        /// how to bring a joiner up to date by asking GameState.IsPlayMode, and the ESC menu leaves
+        /// play mode (PlayingMode.OnClickedMenu switches to MainMenuMode). A player who dropped and
+        /// came back while the host had the menu open -- the natural thing to do when a friend
+        /// drops -- was treated as joining a lobby: told to name a new kingdom, sent the map seed
+        /// instead of the running world, and every other guest was sent the seed too. The host's
+        /// own game was untouched, so only the host still had the real state.
+        /// </summary>
+        public static bool GameInProgress
+        {
+            get
+            {
+                if (GameState.inst != null && GameState.inst.IsPlayMode()) return true;
+                return inSessionWorld && NetRouter.IsConnected;
+            }
+        }
+
+        private static bool inSessionWorld;
+
+        /// <summary>
+        /// Keeps <see cref="GameInProgress"/> in step. Called for every menu change, the game's
+        /// own (TransitionToHook) and the mod's (TransitionTo). Only leaving for the lobby, the
+        /// browser or the main menu ends it: the in-game banner, save and settings screens are
+        /// menus too, and the game is still on behind them.
+        /// </summary>
+        private static void NoteMenuStateForSession(MenuState state)
+        {
+            if (state == MenuState.LeaveMenus)
+                inSessionWorld = true;
+            else if (state == MenuState.LobbyScreen || state == MenuState.BrowserScreen || state == MenuState.Menu)
+                inSessionWorld = false;
+        }
+
+        /// <summary>
+        /// True if this machine is hosting, for the same reason IsSessionRunning is public: a
+        /// companion addon that wants to act host-only (e.g. presetting team relations before
+        /// play, see HostPresetRelation) needs this without reaching into KaCMultiplayer.Net at
+        /// all -- one bridge target (Main) instead of two.
+        /// </summary>
+        public static bool IsHost { get { return NetRouter.IsServer; } }
+
+        /// <summary>
         /// Shows the mod screen a state calls for, then hands the state to the game's own menu.
         ///
         /// Each reference is checked. They are recreated on every scene load, SceneLoaded runs
@@ -1480,6 +1832,13 @@ namespace KaCMultiplayer
 
                 if (GameState.inst != null && GameState.inst.mainMenuMode != null)
                     GameState.inst.mainMenuMode.TransitionTo((MainMenuMode.State)state);
+
+                // LeaveMenus is the one state that means "gameplay, not a menu" (see its own
+                // doc comment on MenuState) -- every other value this method is ever called with
+                // means some menu screen is showing again, on the way in or back out of a
+                // session, so IsSessionRunning tracks that distinction exactly.
+                IsSessionRunning = (state == MenuState.LeaveMenus);
+                NoteMenuStateForSession(state);
             }
             catch (Exception ex)
             {
@@ -1698,6 +2057,27 @@ namespace KaCMultiplayer
                 Main.helper.Log("Wolf spawn patch failed (wolf packs will grow independently on every machine): " + e.Message);
             }
 
+            // A den CLEARED on its arbiter, the one moment the pack sweep cannot report. Its own try
+            // for the same reason as the two above. See WolfDenClearedHook.
+            try
+            {
+                MethodInfo denTick = typeof(WolfDen).GetMethod(
+                    "Tick",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (denTick != null)
+                    harmony.Patch(denTick,
+                        new HarmonyMethod(typeof(WolfDenClearedHook).GetMethod("Prefix", BindingFlags.Public | BindingFlags.Static)),
+                        new HarmonyMethod(typeof(WolfDenClearedHook).GetMethod("Postfix", BindingFlags.Public | BindingFlags.Static)),
+                        null);
+
+                Main.helper.Log($"Wolf den clearing sync patched ({denTick != null})");
+            }
+            catch (Exception e)
+            {
+                Main.helper.Log("Wolf den clearing patch failed (a cleared den can linger on other machines): " + e.Message);
+            }
+
             PatchGhostKingdomFreeze(harmony);
         }
 
@@ -1799,6 +2179,75 @@ namespace KaCMultiplayer
             catch (Exception e)
             {
                 Main.helper.Log("Ghost-kingdom freeze patch failed (a departed kingdom will keep simulating): " + e.Message);
+            }
+        }
+
+        // ---- "IS THIS MINE?", ANSWERED WITHOUT ASKING Player.inst --------------------------
+        //
+        // Player.inst is not a stable "who am I" on this machine: the mod retargets it to
+        // whichever kingdom's Update is currently on the call stack (see the Player.Update
+        // transpiler), so every kingdom's own Update runs with Player.inst pointing at ITSELF in
+        // turn, on every machine, one after another. A vanilla check shaped "is this
+        // Player.inst's" is therefore true for whichever kingdom happens to be simulating right
+        // now, not for the kingdom this specific machine's own player actually runs -- which is
+        // silent and universal rather than loud and local: construction sounds, damage
+        // notifications and kingdom-log messages for every player's kingdom, played and shown on
+        // every machine, because each one is "Player.inst's" during its own turn through the loop.
+        //
+        // The one thing that does NOT get swapped is which Steam account is running this specific
+        // process. PlayerSteamID is read once, from SteamUser.GetSteamID(), and never touched
+        // again; matching it against the steamId already recorded per SessionPlayer answers "is
+        // this mine" correctly regardless of whose Update happens to be running when the question
+        // is asked.
+
+        /// <summary>
+        /// True when <paramref name="landmass"/> belongs to whichever human kingdom is actually
+        /// running on THIS machine's own Steam account -- not to "Player.inst" -- and always true
+        /// in single player, where that question was never ambiguous.
+        /// </summary>
+        public static bool IsLocalLandmass(int landmass)
+        {
+            if (!NetClient.client.IsConnected) return true;
+
+            try
+            {
+                LandmassOwner owner = World.GetLandmassOwner(landmass);
+                if (owner == null) return false;
+
+                foreach (SessionPlayer p in kCPlayers.Values)
+                {
+                    if (p == null || p.inst == null || p.inst.PlayerLandmassOwner != owner) continue;
+                    return p.steamId == PlayerSteamID;
+                }
+            }
+            catch { }
+
+            return false;   // no session player owns this landmass (AI, or not resolved yet); not ours to announce
+        }
+
+        /// <summary>
+        /// Building.IsPlayerBuilding asks the same question vanilla always could answer safely in
+        /// single player -- "is this Player.inst's" -- and is the reason a construction sound, a
+        /// damage warning or an advisor message plays for every player's building on every
+        /// machine: PlayBuildingSound, TakeDamageInternal, Keep.SetAdvisorMessage and several
+        /// others all gate on it directly, trusting it to mean "mine", and it currently means
+        /// "whoever is simulating right now". BuildingPlayerReferencePatch's blanket rewrite makes
+        /// this WORSE rather than better if left in scope: this method's whole job is to compare
+        /// something to Player.inst, and rewriting Player.inst to "this building's own owner"
+        /// turns that comparison into "does this building's owner own this building", which is
+        /// always true. It is excluded from that rewrite (see BuildingPlayerReferencePatch) so
+        /// this Prefix is the only thing deciding the answer.
+        /// </summary>
+        [HarmonyPatch(typeof(Building), "IsPlayerBuilding")]
+        public class BuildingIsPlayerBuildingHook
+        {
+            public static bool Prefix(Building __instance, ref bool __result)
+            {
+                if (!NetClient.client.IsConnected) return true;   // vanilla's own answer is already correct here
+
+                Cell cell = __instance == null ? null : __instance.GetCell();
+                __result = cell != null && IsLocalLandmass(cell.landMassIdx);
+                return false;
             }
         }
 
@@ -1909,11 +2358,12 @@ namespace KaCMultiplayer
                     catch { }
                 }
 
-
                 int hulls = RepaintShipHulls();
+                int unitLiveries = RefreshUnitMaterials();
 
                 Main.helper.Log($"[BANNER] repainted {repainted} flag(s) across {kingdoms} kingdom(s) "
-                                + $"and {hulls} ship hull(s), {failed} could not resolve an owner");
+                                + $"and {hulls} ship hull(s) and {unitLiveries} unit livery/liveries, "
+                                + $"{failed} could not resolve an owner");
             }
             catch (Exception e) { Main.helper.Log("[BANNER] repaint error: " + e.Message); }
         }
@@ -1960,6 +2410,67 @@ namespace KaCMultiplayer
             catch (Exception e) { Main.helper.Log("[BANNER] ship repaint error: " + e.Message); }
 
             return done;
+        }
+
+        private static int RefreshUnitMaterials()
+        {
+            int done = 0;
+            foreach (SessionPlayer player in kCPlayers.Values)
+            {
+                try
+                {
+                    if (player == null || player.inst == null || player.inst.PlayerLandmassOwner == null) continue;
+                    ArmyDefaultStanceHook.EnsureUnitsAreVisible(player.inst.PlayerLandmassOwner.teamId);
+                    done++;
+                }
+                catch (Exception e) { Main.LogEx("post-load unit material refresh", e); }
+            }
+            return done;
+        }
+
+        // A FISHING BOAT SPAWNS AND DESPAWNS FAR MORE OFTEN THAN A MERCHANT SHIP, so the sweep
+        // above chronically loses the race against it: RepaintShipHulls only runs when something
+        // marks banners dirty, and by the time it next does, today's freshly spawned fishing boat
+        // may already be gone, replaced by tomorrow's, which hits the exact same bug fresh.
+        // ShipBase.Init calls UpdateMaterial immediately on every new ship, and if the owner's
+        // UniMaterialFogClip has not been assigned yet -- SetBannerIdx has not run for that team,
+        // or GetLandmassOwnerByTeamId has nothing to return at all -- the paint is a null
+        // material, which Unity shows as hot pink. Boats churning faster than the sweep means
+        // there is close to always a freshly hot-pink one somewhere, which reads as "fishing
+        // boats are pink", full stop, rather than "one boat was pink for a moment".
+        //
+        // A Prefix catches this at the one moment RepaintShipHulls cannot reach: the instant of
+        // creation. It tells "not ready yet" from "genuinely nothing to paint" and, for the
+        // former, skips the assignment instead of drawing pink and asks for a sweep instead of
+        // hoping one happens to arrive before the boat does. Skipping leaves the renderer at
+        // whatever it already had -- the hull prefab's own default material -- an undyed boat
+        // rather than an obviously broken one, until the sweep (or this same ship's own next
+        // call) paints it for real.
+        [HarmonyPatch(typeof(ShipBase), "UpdateMaterial")]
+        public class ShipBaseUpdateMaterialHook
+        {
+            public static bool Prefix(ShipBase __instance)
+            {
+                if (!NetClient.client.IsConnected || __instance == null) return true;
+
+                int teamId = KaCMultiplayer.Net.PrivateField.Get<int>(__instance, "_teamID", -1);
+                if (teamId < 0) return true;   // vanilla's own no-op path; nothing to guard
+
+                LandmassOwner owner = World.GetLandmassOwnerByTeamId(teamId);
+                if (owner == null)
+                {
+                    Main.MarkBannersDirty();
+                    return false;   // team/ownership may still be settling; retry in the banner sweep
+                }
+
+                if (owner.UniMaterialFogClip == null)
+                {
+                    Main.MarkBannersDirty();
+                    return false;   // skip the null paint; the sweep repaints it once the banner is ready
+                }
+
+                return true;
+            }
         }
 
         /// <summary>
@@ -2081,6 +2592,47 @@ namespace KaCMultiplayer
             }
         }
 
+        // CASTLE BANNERS never repainted in a session. Keep.UpdateBanners, which is what the sweep
+        // above runs for a keep, is:
+        //
+        //     if (b.TeamID() != 0) return;
+        //     foreach (cloth) cloth.material.mainTexture = Player.inst.PlayerLandmassOwner.BannerTexture;
+        //
+        // so it only ever repaints the single-player kingdom's castle. Multiplayer kingdoms are team
+        // 5 and up and AI kingdoms 2 to 4, so in a session it paints nothing, and a castle keeps
+        // whatever cloth Keep.OnBuildingPlacement gave it (that one does look its owner up by team).
+        // An AI castle mirrored onto a guest, or any castle whose kingdom's banner arrived after it
+        // was placed, kept a blank banner for good.
+        //
+        // This adds the paint OnBuildingPlacement does, for every team. The cloth is found by name
+        // because the Cloth type lives in UnityEngine.ClothModule, which nothing else in the mod
+        // references.
+        [HarmonyPatch(typeof(Keep), "UpdateBanners")]
+        public class KeepUpdateBannersHook
+        {
+            public static void Postfix(Keep __instance)
+            {
+                if (!NetClient.client.IsConnected || __instance == null) return;
+
+                Building b = __instance.GetComponent<Building>();
+                if (b == null) return;
+
+                int team = b.TeamID();   // vanilla already called this, so it cannot throw here
+                if (team == 0) return;   // vanilla painted it
+
+                LandmassOwner owner = World.GetLandmassOwnerByTeamId(team);
+                if (owner == null || owner.BannerTexture == null) return;
+
+                SkinnedMeshRenderer[] cloths = __instance.GetComponentsInChildren<SkinnedMeshRenderer>(true);
+                for (int i = 0; i < cloths.Length; i++)
+                {
+                    SkinnedMeshRenderer r = cloths[i];
+                    if (r == null || r.GetComponent("Cloth") == null) continue;
+                    r.material.mainTexture = owner.BannerTexture;
+                }
+            }
+        }
+
         /// <summary>
         /// Finds a wolf den by the id every machine already shares for it. Dens travel with the
         /// world rather than being spawned during play, so unlike a catapult this id needed no
@@ -2182,6 +2734,31 @@ namespace KaCMultiplayer
 
                 Deferred++;
                 return false;
+            }
+        }
+
+        /// <summary>
+        /// Notices a wolf den being cleared -- its pack going from some wolves to none within one
+        /// WolfDen.Tick, which is where the game destroys the den and leaves an empty cave -- and
+        /// has the arbiter say so (CombatSync.PublishWolfDenCleared), because nothing else would.
+        ///
+        /// Before and after rather than hooking the destroy itself: the pack count is all this
+        /// needs, and a den that is torn down while it still has wolves (a load, leaving the game)
+        /// never reads as cleared. Applied by hand in Preload, like the other wolf hooks.
+        /// </summary>
+        public class WolfDenClearedHook
+        {
+            public static void Prefix(WolfDen __instance, ref int __state)
+            {
+                __state = (__instance != null && __instance.wolfData != null) ? __instance.wolfData.Count : 0;
+            }
+
+            public static void Postfix(WolfDen __instance, int __state)
+            {
+                if (__state == 0 || __instance == null || __instance.wolfData == null) return;
+                if (__instance.wolfData.Count != 0) return;
+
+                KaCMultiplayer.Combat.CombatSync.PublishWolfDenCleared(__instance);
             }
         }
 
@@ -2690,7 +3267,7 @@ namespace KaCMultiplayer
             /// </summary>
             private static MethodInfo updateMaterialFor;
 
-            private static void EnsureUnitsAreVisible(int teamId)
+            public static void EnsureUnitsAreVisible(int teamId)
             {
                 try
                 {
@@ -2950,6 +3527,129 @@ namespace KaCMultiplayer
                     });
                 }
                 catch (Exception e) { Main.helper.Log("villager home hook error: " + e.Message); }
+            }
+        }
+
+        // THE COMMENT ABOVE THIS ONE SAYS "only the owner runs that" about Player.TrySettlePeople,
+        // and it was wrong, in the same way PlayerUpdateFreezeHook's own comment already documents
+        // for Player.Update generally: "Player.Update runs for EVERY kingdom on every machine ...
+        // Nothing stopped it when their owner left" (that one was about a departed owner; this is
+        // the same mechanism with the owner still present).
+        //
+        // Player.TrySettlePeople and Player.UpdatePersonArrival are the ONLY two call sites of
+        // Villager.SetHome in the whole game (checked against the shipped IL: nothing else calls
+        // it). UpdatePersonArrival is called directly from Player.Update, unconditionally, for
+        // every kingdom, on every machine, exactly like every other vanilla Player method the
+        // singleton transpiler leaves able to run on a non-local receiver. So a REMOTE kingdom's
+        // "does anyone want to move in" and "is anyone waiting to arrive" checks run independently
+        // on the host, on every other guest, and on the owner, all at once, all reading THAT
+        // machine's own (possibly not yet caught-up) view of who is homeless and which homes are
+        // open, and all of them able to call SetHome and broadcast it.
+        //
+        // This is the exact shape of bug BarracksTickForeignHook and the foreign-merchant suppression
+        // in ShipSystem.Update already exist to close for army spawning and trade ships: a decision a
+        // kingdom makes about itself must be made ONCE, by its own machine, with every other machine
+        // only ever applying what that machine broadcasts. Housing never got the same treatment.
+        //
+        // The three-way race this opens explains both halves of the same player report: multiple
+        // machines independently deciding a new arrival should take an "open" home (each sees the
+        // same apparent vacancy before anyone's SetHome broadcast has told the others otherwise) is
+        // "it seemed to uncap how many people could move in"; and it is also exactly the kind of
+        // divergence a save baked in the middle of would explain a resident going missing from a
+        // Home's packed list (see EnsureNoOrphanedHomelessVillagers) without needing the network to
+        // have dropped anything, if two machines' own copies of "who lives here" had already parted
+        // ways before the save ran.
+        //
+        // Gated the same way BarracksTickForeignHook gates Barracks.Tick: our own kingdom (including
+        // the trivial case of a fresh, unconnected single-player game) runs normally; a live, present,
+        // OTHER kingdom's copy is skipped and waits for that kingdom's own machine to decide and
+        // broadcast. A frozen (isGhost) kingdom never reaches here at all, PlayerUpdateFreezeHook
+        // already stops its Update before UpdatePersonArrival would run, and TrySettlePeople's other
+        // callers (TownSquare.TrySettleAttractedPeople, the debug key in KeyboardControl) are building-
+        // and player-driven respectively, so the same "is this ours" question answers both.
+        [HarmonyPatch(typeof(Player), "UpdatePersonArrival")]
+        public class PlayerUpdatePersonArrivalForeignHook
+        {
+            public static bool Prefix(Player __instance)
+            {
+                if (!NetClient.client.IsConnected || __instance == null) return true;
+
+                try
+                {
+                    if (__instance == Player.inst) return true;   // our own kingdom: decide normally
+
+                    int team = (__instance.PlayerLandmassOwner != null)
+                        ? __instance.PlayerLandmassOwner.teamId : int.MinValue;
+
+                    // Another kingdom's own machine decides who moves in; see Main.IsForeignTeam.
+                    if (Main.IsForeignTeam(team)) return false;
+                }
+                catch (Exception e) { Main.LogEx("UpdatePersonArrival ownership gate", e); }
+
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// The same question per ISLAND. The gate above asks which kingdom's Update is running, and
+        /// on our own that is always yes -- but our own Player's arrival pass walks every landmass
+        /// it holds homes on, and on a guest that includes the AI kingdoms' islands, whose houses
+        /// AiMirror puts in this machine's Player (as vanilla does). Without this, new arrivals
+        /// moved into AI houses as the GUEST's villagers.
+        /// </summary>
+        [HarmonyPatch(typeof(Player), "PersonArrivalForLandMass")]
+        public class PlayerPersonArrivalForLandMassForeignHook
+        {
+            public static bool Prefix(int landMass)
+            {
+                if (!NetClient.client.IsConnected) return true;
+
+                try { if (Main.IsForeignLandmass(landMass)) return false; }
+                catch (Exception e) { Main.LogEx("PersonArrivalForLandMass ownership gate", e); }
+
+                return true;
+            }
+        }
+
+        [HarmonyPatch(typeof(Player), "TrySettlePeople")]
+        public class PlayerTrySettlePeopleForeignHook
+        {
+            /// <summary>
+            /// Same gate as <see cref="PlayerUpdatePersonArrivalForeignHook"/>, for
+            /// TrySettlePeople's other callers (TownSquare.TrySettleAttractedPeople runs on every
+            /// machine's own copy of every kingdom's town squares, same reasoning as Barracks.Tick).
+            ///
+            /// numHoused/housingShortage are out parameters vanilla always assigns; skipping the
+            /// original body still has to leave them in a sane state for whichever caller reads
+            /// them, rather than whatever the caller happened to pass in.
+            /// </summary>
+            public static bool Prefix(Player __instance, int landMass, ref int numHoused, ref bool housingShortage)
+            {
+                if (!NetClient.client.IsConnected || __instance == null) return true;
+
+                try
+                {
+                    // Another kingdom's island (an AI's, on a guest) is not ours to settle even when
+                    // our own Player is the one asking; see PlayerPersonArrivalForLandMassForeignHook.
+                    bool foreign = Main.IsForeignLandmass(landMass);
+
+                    if (!foreign && __instance != Player.inst)
+                    {
+                        int team = (__instance.PlayerLandmassOwner != null)
+                            ? __instance.PlayerLandmassOwner.teamId : int.MinValue;
+                        foreign = Main.IsForeignTeam(team);
+                    }
+
+                    if (foreign)
+                    {
+                        numHoused = 0;
+                        housingShortage = false;
+                        return false;
+                    }
+                }
+                catch (Exception e) { Main.LogEx("TrySettlePeople ownership gate", e); }
+
+                return true;
             }
         }
 
@@ -3235,8 +3935,39 @@ namespace KaCMultiplayer
         [HarmonyPatch("TransitionTo")]
         public class TransitionToHook
         {
-            private static void Prefix(MainMenuMode.State newState)
+            private static bool Prefix(MainMenuMode.State newState)
             {
+                // A REMOTE KINGDOM'S OWN DEFEAT MUST NOT REDIRECT THIS MACHINE'S SCREEN.
+                //
+                // Player.Update runs the same vanilla happiness-failure check for every kingdom on
+                // every machine (see PlayerUpdateFreezeHook below), because that is what makes a
+                // remote kingdom look alive at all. Vanilla's own check has no idea multiplayer
+                // exists: once a Player's timeAtFailHappiness passes 500 it calls straight into
+                // TransitionTo(Failure), with no idea that the Player currently ticking might not
+                // be the one actually looking at this screen. One kingdom's unhappy villagers
+                // could push EVERY machine in the session to a "you have been overthrown" screen,
+                // not just that kingdom's own, and on the host that screen is what then triggers
+                // the return-to-menu teardown below, ending the session for everyone else too over
+                // a defeat that was never theirs.
+                //
+                // Suppressed here rather than shown and then undone: once vanilla has actually
+                // switched game mode there is real work to unwind, and refusing the call in the
+                // first place is the safer side of that trade. Keep.OnWrecked, the OTHER thing
+                // that can end a game, already checks `Player.inst.keep == this`, this is the same
+                // ownership check for the one vanilla path that was missing it.
+                if (newState == MainMenuMode.State.Failure && NetClient.client.IsConnected)
+                {
+                    Player updating = PlayerUpdateFreezeHook.CurrentlyUpdating;
+                    if (updating != null && updating != Player.inst)
+                    {
+                        int team = updating.PlayerLandmassOwner != null ? updating.PlayerLandmassOwner.teamId : -1;
+                        Main.helper.Log("[net] team " + team + "'s own happiness failure tried to push "
+                            + "this machine to the game-over screen; suppressed, only their own machine "
+                            + "should see that");
+                        return false;   // skip vanilla's TransitionTo entirely
+                    }
+                }
+
                 // Kept at Log level: this one line is the spine of every menu-flow diagnosis in
                 // output.txt, and it is how the Load-vs-lobby routing bug was pinned.
                 Main.helper.Log($"menu state -> {(MenuState)newState}");
@@ -3245,6 +3976,10 @@ namespace KaCMultiplayer
 
                 if (newState != MainMenuMode.State.Uninitialized)
                     Main.menuState = (MenuState)newState;
+
+                NoteMenuStateForSession((MenuState)newState);
+
+                return true;
             }
 
             /// <summary>
@@ -3281,6 +4016,32 @@ namespace KaCMultiplayer
 
                 Main.helper.Log("[net] returned to the main menu mid-session; tearing the network "
                                 + "down rather than leaving it running behind the menu");
+
+                // OUR OWN VILLAGERS AND BUILDINGS, which ResetNetworkState deliberately leaves
+                // alone. Its "destroy remote kingdoms" step skips the local player on the
+                // assumption that vanilla resets Player.inst.gameObject itself, which is true when
+                // a NEW game is about to reuse it and is NOT true here: nothing starts a new game
+                // after this, the player is simply back at the main menu, and their old kingdom's
+                // people and buildings were left standing, visible behind the menu, with no world
+                // left simulating them and nothing left to clean them up. Reported live: a
+                // kingdom's population still walking around the water behind the main-menu title.
+                //
+                // Done BEFORE the network reset below, while Player.inst still points at the
+                // kingdom that needs clearing; ResetNetworkState clears session bookkeeping, not
+                // this.
+                try
+                {
+                    Player local = Player.inst;
+                    if (local != null)
+                    {
+                        if (local.buildingContainer != null)
+                            UnityEngine.Object.Destroy(local.buildingContainer);
+
+                        KaCMultiplayer.Net.SteamLobby.RemoveVillagers(local, local.Workers);
+                        KaCMultiplayer.Net.SteamLobby.RemoveVillagers(local, local.Homeless);
+                    }
+                }
+                catch (Exception e) { Main.helper.Log("[net] clearing our own kingdom on return-to-menu failed: " + e.Message); }
 
                 try { KaCMultiplayer.Net.SteamLobby.ResetNetworkState(); }
                 catch (Exception e) { Main.helper.Log("[net] reset on return-to-menu failed: " + e.Message); }
@@ -3459,9 +4220,57 @@ namespace KaCMultiplayer
         }
 
         /// <summary>
-        /// NO COMPUTER KINGDOMS IN A MULTIPLAYER GAME. Every island belongs to a person.
+        /// Builds AIBrainsContainer.aiStartInfo.startData from LobbySettings.Current, so every
+        /// machine computes the identical AI-kingdom configuration before World.PlaceAIs ever
+        /// runs -- the same host-authoritative, synced-before-generation treatment WorldSize/
+        /// WorldType/WorldRivers already get via LobbySettingsMessage/ApplyToWorld, called from
+        /// the same place (NetRegistrations.ApplyLobbySettings), plus defensively again from
+        /// whatever hook wraps World.PlaceAIs itself, since it is cheap and idempotent and that
+        /// removes any dependency on exact message-ordering.
         ///
-        /// This used to be true by accident. MainMenuMode.StartGame ends by reading
+        /// landmass is left -1 on every entry (let PlaceAIs choose), matching how the lobby
+        /// control has no specific landmass to offer. personalityKey cycles the three keys
+        /// PersonalityCollection actually recognises (confirmed via the shipped IL: "bythebook",
+        /// "xenophobe", "hippie"). bioCode is the host's chosen rival code for that slot: vanilla
+        /// uses it as both the name (AIKingdomNamePool[code]) and the banner
+        /// (LandmassOwner.SetBannerIdx), so the kingdom that appears in game is the one the
+        /// lobby row showed.
+        /// </summary>
+        public static void ApplyAiKingdomConfig()
+        {
+            try
+            {
+                if (AIBrainsContainer.inst == null) return;
+
+                LobbySettings s = LobbySettings.Current;
+                int count = Mathf.Clamp(s.AiKingdomCount, 0, LobbySettings.MaxAiKingdoms);
+                string[] keys = { "bythebook", "xenophobe", "hippie" };
+
+                var data = new AIBrainsContainer.PreStartAIConfig.AIStartData[count];
+                for (int i = 0; i < count; i++)
+                {
+                    data[i] = new AIBrainsContainer.PreStartAIConfig.AIStartData
+                    {
+                        landmass = -1,
+                        bioCode = s.AiCodes[i] >= 0 ? s.AiCodes[i] : i,
+                        personalityKey = keys[i % keys.Length],
+                        skillLevel = (AIKingdom.SkillLevel)Mathf.Clamp(s.AiDifficulties[i], 0, 3)
+                    };
+                }
+
+                if (AIBrainsContainer.inst.aiStartInfo == null)
+                    AIBrainsContainer.inst.aiStartInfo = new AIBrainsContainer.PreStartAIConfig();
+
+                AIBrainsContainer.inst.aiStartInfo.startData = data;
+            }
+            catch (Exception e) { Main.LogEx("applying AI kingdom config", e); }
+        }
+
+        /// <summary>
+        /// COMPUTER KINGDOMS IN A MULTIPLAYER GAME: exactly the ones the host asked for, never
+        /// leftovers from someone's single-player game.
+        ///
+        /// Having none used to be true by accident. MainMenuMode.StartGame ends by reading
         /// RivalKingdomSettingsUI.inst.rivalItems, that screen is never shown in multiplayer, so
         /// the field was null, StartGame threw, and the AI config it would have written was never
         /// built. ApplySessionStart even logs the throw as the expected path.
@@ -3479,19 +4288,411 @@ namespace KaCMultiplayer
         /// islands nobody owned, with twenty villagers credited to her.
         ///
         /// So the rule is stated rather than hoped for. Single-player is untouched: this only
-        /// refuses while a session is live.
+        /// acts while a session is live.
+        ///
+        /// NOW: AI KINGDOMS, ON PURPOSE, ON THE HOST ONLY. The host picks how many AI kingdoms a
+        /// game has in the lobby (LobbySettings.AiKingdomCount, AI rows in the player list), so
+        /// the rule above becomes "only what the host asked for, and only once":
+        ///
+        ///   - Guests never place AI kingdoms. They have no AI brains at all; the host's machine is
+        ///     the one that simulates them, and shows them to guests building by building
+        ///     (Net/AiMirror.cs).
+        ///   - The host builds the config from the lobby immediately before vanilla reads it
+        ///     (ApplyAiKingdomConfig), overwriting whatever a leftover single-player
+        ///     RivalKingdomSettingsUI or StartGame put there -- the exact stale-rivals bug above.
+        ///   - Every AI gets an EXPLICIT island: vanilla ranks candidates by size and only avoids
+        ///     the island of the keep that triggered this, so left alone it can take an island the
+        ///     lobby just handed to a guest who has not placed yet. HumanKeepLandmasses is every
+        ///     island the lobby assigned to a human.
+        ///   - Once: PlaceAIs is reached from Keep.OnPlayerPlacement, and a second call would
+        ///     spawn a second set of kingdoms with team ids past the AI range.
         /// </summary>
         [HarmonyPatch(typeof(World), "PlaceAIs")]
-        public class NoAIKingdomsInMultiplayerHook
+        public class AIKingdomPlacementHook
+        {
+            public static bool Prefix(int playersLandmass)
+            {
+                if (!Main.InMultiplayer) return true;
+
+                try
+                {
+                    if (!NetRouter.IsServer)
+                    {
+                        Main.helper.Log("[AI] guest: AI kingdoms are placed and run by the host");
+                        return false;
+                    }
+
+                    AIBrainsContainer brains = AIBrainsContainer.inst;
+                    if (brains == null) return false;
+                    if (brains.kingdoms != null && brains.kingdoms.Count > 0)
+                    {
+                        Main.helper.Log("[AI] AI kingdoms already placed this game; not placing again");
+                        return false;
+                    }
+
+                    ApplyAiKingdomConfig();
+                    var wanted = brains.aiStartInfo != null ? brains.aiStartInfo.startData : null;
+                    if (wanted == null || wanted.Length == 0)
+                    {
+                        Main.helper.Log("[AI] no AI kingdoms requested in the lobby");
+                        return false;
+                    }
+
+                    // Players pick first. The host's own keep is what calls this, usually before
+                    // anyone else has chosen an island, so the AI would take islands a guest was
+                    // about to pick. Put off until every player has a keep (TickPendingAiPlacement
+                    // calls this again then).
+                    if (!aiPlacementReleased)
+                    {
+                        string waitingFor = PlayersWithoutKeeps();
+                        if (waitingFor != null)
+                        {
+                            if (!aiPlacementPending)
+                            {
+                                aiPlacementPending = true;
+                                aiPendingLandmass = playersLandmass;
+                                aiPendingSince = Time.unscaledTime;
+                                Main.helper.Log("[AI] AI kingdoms wait until every player has placed a keep; waiting for " + waitingFor);
+                            }
+                            return false;
+                        }
+                    }
+
+                    var placed = AssignAiLandmasses(wanted, playersLandmass);
+                    brains.aiStartInfo.startData = placed;
+
+                    if (placed.Length < wanted.Length)
+                        Main.helper.Log($"[AI] only {placed.Length} free island(s) for {wanted.Length} requested AI kingdom(s)");
+                    if (placed.Length == 0) return false;
+
+                    Main.helper.Log($"[AI] placing {placed.Length} AI kingdom(s) on landmass(es) "
+                                    + string.Join(", ", placed.Select(d => d.landmass.ToString()).ToArray()));
+
+                    // What follows (each kingdom's keep, first buildings and five villagers) is the
+                    // AI's doing, not the host player's; the broadcast hooks check this.
+                    aiTickFrame = Time.frameCount;
+                    return true;
+                }
+                catch (Exception e)
+                {
+                    Main.LogEx("AI kingdom placement", e);
+                    return false;
+                }
+            }
+
+            public static void Postfix()
+            {
+                if (!Main.InMultiplayer || !NetRouter.IsServer) return;
+
+                try
+                {
+                    AIBrainsContainer brains = AIBrainsContainer.inst;
+                    if (brains == null || brains.kingdoms == null) return;
+
+                    LobbySettings s = LobbySettings.Current;
+                    Keep[] keeps = UnityEngine.Object.FindObjectsOfType<Keep>();
+
+                    foreach (AIKingdom k in brains.kingdoms)
+                    {
+                        if (k == null || k.LandmassOwner == null) continue;
+                        LandmassOwner lo = k.LandmassOwner;
+
+                        // Which lobby slot this kingdom came from: its banner is the slot's code.
+                        int slot = -1;
+                        for (int i = 0; i < s.AiKingdomCount && i < LobbySettings.MaxAiKingdoms; i++)
+                            if (s.AiCodes[i] == lo.bannerIdx) { slot = i; break; }
+
+                        string name = slot >= 0
+                            ? AiKingdomControl.NameFor(slot, lo.bannerIdx)
+                            : AiKingdomControl.DefaultNameFor(0, lo.bannerIdx);
+                        string label = name + " (AI)";
+
+                        var islands = new List<int>();
+                        if (lo.ownedLandMasses != null)
+                            for (int i = 0; i < lo.ownedLandMasses.Count; i++) islands.Add(lo.ownedLandMasses.data[i]);
+
+                        // Vanilla named the island from its pool (SpawnAIKingdom); this is the
+                        // lobby's name for it, marked as an AI so nobody mistakes it for a player.
+                        foreach (int lm in islands)
+                        {
+                            if (Player.inst != null && Player.inst.LandMassNames != null
+                                && lm >= 0 && lm < Player.inst.LandMassNames.Count)
+                                Player.inst.LandMassNames[lm] = label;
+                        }
+
+                        bool hasKeep = keeps.Any(kp =>
+                        {
+                            Building b = kp.GetComponent<Building>();
+                            return b != null && islands.Contains(b.LandMass());
+                        });
+
+                        Main.helper.Log($"[AI] '{label}' team {lo.teamId} on landmass {string.Join(", ", islands.Select(x => x.ToString()).ToArray())}, "
+                                        + $"skill {k.skillLevel}, castle {(hasKeep ? "built" : "MISSING")}");
+                    }
+                }
+                catch (Exception e) { Main.LogEx("AI kingdom placement report", e); }
+            }
+        }
+
+        /// <summary>
+        /// Every island the lobby handed a human this game, host-side. Filled by the Start
+        /// button's keep-placement loop; empty when players place their own keeps.
+        /// </summary>
+        public static readonly HashSet<int> HumanKeepLandmasses = new HashSet<int>();
+
+        // AI placement put off until every player has a keep (see AIKingdomPlacementHook).
+        private static bool aiPlacementPending;
+        private static bool aiPlacementReleased;
+        private static int aiPendingLandmass = -1;
+        private static float aiPendingSince;
+        private static float aiPendingNextCheck;
+
+        /// <summary>
+        /// How long AI kingdoms wait for a player who has not placed a keep. Past this they take
+        /// whatever islands are still free, so one idle player cannot keep them out of the game.
+        /// </summary>
+        private const float AiPlacementWaitSeconds = 180f;
+
+        /// <summary>
+        /// The names of connected players who have no keep yet, or null when everyone has one.
+        /// A player who left (a ghost) is not waited for.
+        /// </summary>
+        private static string PlayersWithoutKeeps()
+        {
+            var names = new List<string>();
+            foreach (SessionPlayer p in kCPlayers.Values)
+            {
+                if (p == null || p.isAI || p.isGhost || p.inst == null) continue;
+                if (p.inst.keep == null) names.Add(string.IsNullOrEmpty(p.name) ? p.id.ToString() : p.name);
+            }
+            return names.Count == 0 ? null : string.Join(", ", names.ToArray());
+        }
+
+        /// <summary>
+        /// Host, every frame: places the AI kingdoms once every player has a keep, or once
+        /// AiPlacementWaitSeconds have passed. Checked once a second.
+        /// </summary>
+        private static void TickPendingAiPlacement()
+        {
+            if (!aiPlacementPending) return;
+
+            if (!InMultiplayer || !NetRouter.IsServer || World.inst == null)
+            {
+                aiPlacementPending = false;   // the session ended while waiting
+                return;
+            }
+
+            if (Time.unscaledTime < aiPendingNextCheck) return;
+            aiPendingNextCheck = Time.unscaledTime + 1f;
+
+            string waitingFor = PlayersWithoutKeeps();
+            bool timedOut = Time.unscaledTime - aiPendingSince > AiPlacementWaitSeconds;
+            if (waitingFor != null && !timedOut) return;
+
+            aiPlacementPending = false;
+            helper.Log(waitingFor == null
+                ? "[AI] every player has a keep; placing AI kingdoms"
+                : "[AI] waited " + (int)AiPlacementWaitSeconds + "s for " + waitingFor + "; placing AI kingdoms on the islands still free");
+
+            aiPlacementReleased = true;
+            try { World.inst.PlaceAIs(aiPendingLandmass); }
+            catch (Exception e) { LogEx("placing AI kingdoms after the players", e); }
+            finally { aiPlacementReleased = false; }
+        }
+
+        /// <summary>
+        /// Gives each requested AI kingdom an explicit island: vanilla's own candidate list
+        /// (World.FindValidStartLandmasses, ranked by size the way PlaceAIs ranks it), minus the
+        /// island of the keep that triggered placement, every island assigned to a human, and
+        /// any island someone already owns. Returns only as many entries as there were islands.
+        /// </summary>
+        private static AIBrainsContainer.PreStartAIConfig.AIStartData[] AssignAiLandmasses(
+            AIBrainsContainer.PreStartAIConfig.AIStartData[] wanted, int playersLandmass)
+        {
+            var sizes = new Dictionary<int, int>();
+
+            try
+            {
+                World.inst.FindValidStartLandmasses();
+                FieldInfo listField = typeof(World).GetField("landmassStartInfo", BindingFlags.NonPublic | BindingFlags.Instance);
+                var list = listField == null ? null : listField.GetValue(World.inst) as System.Collections.IList;
+                if (list != null)
+                {
+                    foreach (object info in list)
+                    {
+                        if (info == null) continue;
+                        Type t = info.GetType();
+                        int lm = (int)t.GetField("landmass").GetValue(info);
+                        int size = (int)t.GetField("size").GetValue(info);
+                        sizes[lm] = size;
+                    }
+                }
+            }
+            catch (Exception e) { LogEx("reading vanilla's start-landmass ranking", e); }
+
+            if (sizes.Count == 0)
+            {
+                // Fallback: every landmass, ranked by how many cells it has.
+                foreach (Cell c in World.inst.GetCellsData())
+                {
+                    if (c == null || c.landMassIdx < 0) continue;
+                    int n;
+                    sizes.TryGetValue(c.landMassIdx, out n);
+                    sizes[c.landMassIdx] = n + 1;
+                }
+            }
+
+            List<int> candidates = sizes
+                .Where(kv => kv.Key != playersLandmass
+                          && !HumanKeepLandmasses.Contains(kv.Key)
+                          && World.GetLandmassOwner(kv.Key) == null)
+                .OrderByDescending(kv => kv.Value)
+                .Select(kv => kv.Key)
+                .ToList();
+
+            int count = Math.Min(wanted.Length, candidates.Count);
+            var placed = new AIBrainsContainer.PreStartAIConfig.AIStartData[count];
+            for (int i = 0; i < count; i++)
+            {
+                placed[i] = wanted[i];
+                placed[i].landmass = candidates[i];
+            }
+            return placed;
+        }
+
+        // Frame on which an AI kingdom's Update is running, or -1. Compared against the current
+        // frame rather than trusted as a plain flag: Harmony 1.x has no finalizer, so if the
+        // vanilla Update ever throws, the Postfix that clears this never runs -- and a stuck flag
+        // would silence every broadcast the host makes. Tied to the frame, it can only ever
+        // outlive a throw by the rest of that one frame.
+        private static int aiTickFrame = -1;
+
+        /// <summary>
+        /// True while an AI kingdom's own tick is running on the host. Broadcast hooks check it:
+        /// whatever an AI kingdom does is not the host player's action, and sent out as one it
+        /// would appear on every guest's screen credited to the host's kingdom.
+        /// </summary>
+        public static bool AiTicking { get { return aiTickFrame == Time.frameCount; } }
+
+        /// <summary>
+        /// AI kingdoms think on the host only. A guest has none to tick (AIKingdomPlacementHook
+        /// refuses them), so this is belt and braces there; on the host it brackets the tick so
+        /// broadcast hooks can tell AI actions from the host player's (see AiTicking).
+        /// </summary>
+        [HarmonyPatch(typeof(AIKingdom), "Update")]
+        public class AIKingdomUpdateHook
         {
             public static bool Prefix()
             {
                 if (!Main.InMultiplayer) return true;
+                if (!NetRouter.IsServer) return false;
 
-                Main.helper.Log("[AI] skipped the AI-kingdom placement; every island in a "
-                                + "multiplayer game belongs to a player");
-                return false;
+                aiTickFrame = Time.frameCount;
+                return true;
             }
+
+            public static void Postfix()
+            {
+                aiTickFrame = -1;
+            }
+        }
+
+        /// <summary>
+        /// The game's own AI diplomacy -- its envoys' conversations, the island panel's hostility
+        /// button -- changes relations through World.SetRelations and always names the human as
+        /// team 0, single-player's only kingdom. In multiplayer nobody is team 0, and SetRelations
+        /// indexes a 5x5 array with no bounds check: for a real team it throws, and for 0 it writes
+        /// a slot nothing reads, so an envoy's declaration of war simply never happened.
+        ///
+        /// Rewritten here: 0 becomes this machine's own kingdom (only the host has AI kingdoms, and
+        /// their envoys walk to the host's keep), and an AI-vs-human pair is recorded in the mod's
+        /// relation table and broadcast (Main.HostPresetRelation), with the side effects vanilla
+        /// applies to the AI: its OnDeclaredWar and cleared mission and lowered opinion on war, its
+        /// enemy count reset otherwise, its ignored-envoy count reset on any change. AI-vs-AI and
+        /// everything else vanilla owns is left to vanilla.
+        /// </summary>
+        [HarmonyPatch(typeof(World), "SetRelations")]
+        public class WorldSetRelationsHook
+        {
+            public static bool Prefix(int teamIDA, int teamIDB, World.Relations r)
+            {
+                if (!Main.InMultiplayer) return true;
+
+                try
+                {
+                    int local = LocalTeamOr(int.MinValue);
+                    int a = teamIDA == 0 ? local : teamIDA;
+                    int b = teamIDB == 0 ? local : teamIDB;
+                    if (!PlayerRelations.IsAiPair(a, b)) return true;
+
+                    // Only the host runs AI kingdoms; a guest has nothing to decide here.
+                    if (!NetRouter.IsServer) return false;
+
+                    int ai = (a >= AiDiplomacy.FirstAiTeam && a <= AiDiplomacy.LastAiTeam) ? a : b;
+                    int human = ai == a ? b : a;
+                    AIKingdom k = AiDiplomacy.KingdomFor(ai);
+                    World.Relations was = PlayerRelations.Get(ai, human);
+
+                    if (k != null)
+                    {
+                        if (r == World.Relations.Enemy) AiDiplomacy.ApplyWarSideEffects(k, human);
+                        else k.enemyPoints = 0;
+                        if (was != r) k.ignoreCount = 0;
+                    }
+
+                    Main.HostPresetRelation(ai, human, r);
+                    helper.Log($"[AI] the game set team {ai} <-> team {human} = {r} (was {was})");
+                    return false;
+                }
+                catch (Exception e)
+                {
+                    LogEx("AI relation change", e);
+                    return false;
+                }
+            }
+        }
+
+        private static int LocalTeamOr(int fallback)
+        {
+            return (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
+                ? Player.inst.PlayerLandmassOwner.teamId : fallback;
+        }
+
+        // TEAM 0 IS NOBODY IN MULTIPLAYER, SO IT IS YOU. The game files some opinion changes under
+        // team 0 -- the island panel's hostility button, an ignored envoy -- while its envoy
+        // conversations read the opinion of Player.inst's own team. In single-player those are the
+        // same kingdom; here they would be two separate numbers, and a slight nobody could see would
+        // never count against you. These five rewrite 0 to this machine's own team before the
+        // game's own standing methods run.
+
+        [HarmonyPatch(typeof(LandmassOwner), "InitStandingIfNecessary")]
+        public class StandingInitTeamZeroHook
+        {
+            public static void Prefix(ref int lmo) { if (lmo == 0 && Main.InMultiplayer) lmo = LocalTeamOr(0); }
+        }
+
+        [HarmonyPatch(typeof(LandmassOwner), "GetStandingFor")]
+        public class StandingGetTeamZeroHook
+        {
+            public static void Prefix(ref int teamID) { if (teamID == 0 && Main.InMultiplayer) teamID = LocalTeamOr(0); }
+        }
+
+        [HarmonyPatch(typeof(LandmassOwner), "GetPointsStandingFor")]
+        public class StandingPointsTeamZeroHook
+        {
+            public static void Prefix(ref int teamID) { if (teamID == 0 && Main.InMultiplayer) teamID = LocalTeamOr(0); }
+        }
+
+        [HarmonyPatch(typeof(LandmassOwner), "ModifyStandingFor")]
+        public class StandingModifyTeamZeroHook
+        {
+            public static void Prefix(ref int teamId) { if (teamId == 0 && Main.InMultiplayer) teamId = LocalTeamOr(0); }
+        }
+
+        [HarmonyPatch(typeof(LandmassOwner), "SetStandingFor")]
+        public class StandingSetTeamZeroHook
+        {
+            public static void Prefix(ref int lmo) { if (lmo == 0 && Main.InMultiplayer) lmo = LocalTeamOr(0); }
         }
 
         [HarmonyPatch(typeof(World), "GetWitchHutAt")]
@@ -3523,6 +4724,11 @@ namespace KaCMultiplayer
             {
                 if (!NetClient.client.IsConnected || NetApply.InProgress) return;
                 if (PendingObj == null) return;
+
+                // An AI kingdom building, placed by the host's own AI simulation. Not the host
+                // player's building, and sending it as one would hand the AI's island to the host
+                // on every guest's screen (ApplyBuildPlace takes ownership for the sender).
+                if (Main.AiTicking) return;
 
                 try
                 {
@@ -3883,7 +5089,11 @@ namespace KaCMultiplayer
                     if (teamIDB == 0) teamIDB = localTeam;
                 }
 
-                if (PlayerRelations.IsPlayerPair(teamIDA, teamIDB))
+                // Player pairs, and now an AI kingdom against a player: both live in the mod's own
+                // table (see PlayerRelations.IsAiPair). Answering the AI pair from it is what lets
+                // the AI's own war logic, gates and armies act on a war or alliance made in the
+                // diplomacy window.
+                if (PlayerRelations.IsPlayerPair(teamIDA, teamIDB) || PlayerRelations.IsAiPair(teamIDA, teamIDB))
                 {
                     __result = PlayerRelations.Get(teamIDA, teamIDB);
                     return false;
@@ -4054,6 +5264,14 @@ namespace KaCMultiplayer
         [HarmonyPatch(typeof(Player), "Update")]
         public class PlayerUpdateFreezeHook
         {
+            /// <summary>
+            /// Whose Update is on the call stack right now, so TransitionToHook can tell a
+            /// kingdom's own defeat from one arriving out of a remote kingdom's copy of the same
+            /// vanilla happiness-failure check. Null whenever no Player.Update reached from here is
+            /// currently running vanilla's own body.
+            /// </summary>
+            public static Player CurrentlyUpdating { get; private set; }
+
             public static bool Prefix(Player __instance)
             {
                 if (!NetClient.client.IsConnected || __instance == null) return true;
@@ -4067,9 +5285,21 @@ namespace KaCMultiplayer
                     // Counting moved to TickAllForPlayer, which is now the only thing that
                     // reaches TickAll, so the heartbeat reports ticks that actually happened
                     // rather than Updates that might have caused one.
-                    return !Main.IsFrozenKingdom(__instance);
+                    bool frozen = Main.IsFrozenKingdom(__instance);
+
+                    // Recorded only when vanilla's Update is actually about to run: a frozen
+                    // kingdom's Update never happens, so there is nothing for
+                    // TransitionToHook.Prefix to need the flag during.
+                    if (!frozen) CurrentlyUpdating = __instance;
+                    return !frozen;
                 }
-                catch (Exception e) { Main.LogEx("PlayerUpdateFreezeHook", e); return true; }
+                catch (Exception e) { Main.LogEx("PlayerUpdateFreezeHook", e); CurrentlyUpdating = __instance; return true; }
+            }
+
+            /// <summary>Clears the flag once vanilla's Update returns, frozen or not.</summary>
+            public static void Postfix()
+            {
+                CurrentlyUpdating = null;
             }
 
             /// <summary>
@@ -4228,6 +5458,293 @@ namespace KaCMultiplayer
                 return true;
             }
             catch (Exception e) { LogEx("growing per-landmass building registries", e); return false; }
+        }
+
+        /// <summary>
+        /// Re-adds any home this kingdom owns that fell out of ResidentialsPerLandmass before
+        /// EnsureBuildingRegistriesCoverWorld had widened it to cover that home's landmass.
+        ///
+        /// GROWING the array (above) stops the gap from swallowing the NEXT building placed after
+        /// this machine has the map; it does nothing for one placed BEFORE that, which is already
+        /// on the ground, already owned, fully built, and permanently invisible to
+        /// Player.FindHappiestOpenResidentialOnLandMass and Player.UpdatePersonArrival -- both of
+        /// which only ever look inside ResidentialsPerLandmass[landmass], never at the flat
+        /// Residentials list. A homeless villager can be standing next to an empty house with beds
+        /// free and never be offered it, because the search that would find it only checks a row
+        /// that house was never added to.
+        ///
+        /// Residentials, unlike the per-landmass rows, is added to unconditionally in AddBuilding
+        /// regardless of whether the per-landmass row existed at the time -- so it is a complete
+        /// list of every home this kingdom owns, and the one thing this can check each entry
+        /// against to notice a gap. On a timer for the same reason AliasJobTablesToOwners is: a
+        /// join, a reconnect, a load and a map reroll all create the exact window this closes, and
+        /// none of them share a single hook worth patching instead.
+        /// </summary>
+        public static void EnsureResidentialsRegistryComplete(Player p)
+        {
+            if (p == null || p.Residentials == null || p.ResidentialsPerLandmass == null) return;
+
+            try
+            {
+                int recovered = 0;
+
+                for (int i = 0; i < p.Residentials.Count; i++)
+                {
+                    Home home = p.Residentials.data[i];
+                    if (home == null) continue;
+
+                    int landMass = home.LandMass();
+                    if (landMass < 0 || landMass >= p.ResidentialsPerLandmass.Length) continue;
+
+                    ArrayExt<Home> row = p.ResidentialsPerLandmass[landMass];
+                    if (row == null) continue;
+
+                    bool present = false;
+                    for (int j = 0; j < row.Count; j++)
+                        if (row.data[j] == home) { present = true; break; }
+
+                    if (!present) { row.Add(home); recovered++; }
+                }
+
+                if (recovered > 0)
+                {
+                    int team = (p.PlayerLandmassOwner != null) ? p.PlayerLandmassOwner.teamId : -1;
+                    helper.Log($"[HOUSING] recovered {recovered} home(s) team {team} owned but that were "
+                               + "never in their landmass's residentials registry, so nobody homeless "
+                               + "was ever offered them");
+                }
+            }
+            catch (Exception e) { LogEx("reconciling the residentials registry", e); }
+        }
+
+        /// <summary>
+        /// Re-adds any villager who has no home and is not already in the kingdom's Homeless list.
+        ///
+        /// A HOME'S OCCUPANCY IS NOT SAVED ON THE VILLAGER, IT IS SAVED ON THE HOME. VillagerSaveData
+        /// carries no home reference at all (verified against the game's own IL: its field list is
+        /// hunger, guid, name, age, pos, workPos, sick, sickTime, skills, carryCount, carryType, life,
+        /// timeAtAlive, sicknessStrength, health, diet, skillsArray -- nothing that names a building).
+        /// A villager's home comes back ENTIRELY as a side effect of the OPPOSITE direction:
+        /// Home.HomeSaveData packs the guids of its own Residents, and on load
+        /// Home.HomeSaveData.Unpack -> UnloadVillager resolves each guid and calls Home.AddResident,
+        /// which sets the villager's own home field as a byproduct. A villager whose guid is missing
+        /// from every Home's packed resident list comes back with home == null and is never told so
+        /// by anything else, because nothing else is watching for it.
+        ///
+        /// That gap matters specifically for a REMOTE kingdom's Home, because occupancy is packed
+        /// from whichever machine performs the save (always the host), and the host's own copy of a
+        /// Home.Residents list is a MIRROR kept current only by VillagerSetHomeHook's broadcast of
+        /// every live SetHome call. A resident this machine never received (or received before the
+        /// Home existed here to attach to) is one the host's mirror does not know about, and one the
+        /// host's own autosave/reload then bakes in as absent, on every machine, including the one
+        /// that owns the villager.
+        ///
+        /// The result is a villager who is neither housed (home is null) nor homeless (never added to
+        /// Homeless, since at pack time they legitimately had a home and so were correctly left out of
+        /// HomelessData). Player.FindHappiestOpenResidentialOnLandMass and Player.UpdatePersonArrival
+        /// only ever offer a home to someone already in Homeless, so this villager is permanently
+        /// skipped by both -- the "homelessness became a permanent debuff" report, except they are not
+        /// even flagged homeless to explain the debuff.
+        ///
+        /// This cannot recover which home a dropped villager used to live in; that fact was never
+        /// recorded anywhere this machine can read after the fact. What it CAN do is stop them from
+        /// being invisible to the housing system: once they are correctly filed as Homeless, the
+        /// ordinary search offers them whatever home actually has room, the same as any other
+        /// newly-homeless villager.
+        /// </summary>
+        public static void EnsureNoOrphanedHomelessVillagers(Player p)
+        {
+            if (p == null || p.Workers == null || p.Homeless == null) return;
+
+            try
+            {
+                int recovered = 0;
+
+                for (int i = 0; i < p.Workers.Count; i++)
+                {
+                    Villager v = p.Workers.data[i];
+                    if (v == null) continue;
+
+                    // home is private (Villager has no public accessor for it), hence the
+                    // reflection. IResidence is a plain interface, not a UnityEngine.Object, so this
+                    // is an ordinary reference-null check rather than Unity's overloaded one --
+                    // correct here because we care only about "never assigned by
+                    // UnloadVillager/AddResident", not about a since-destroyed Home (RemoveResident
+                    // already handles that live, and PrivateField.Get<T> itself returns null for a
+                    // null field: null fails "is IResidence" and falls through to the fallback).
+                    if (KaCMultiplayer.Net.PrivateField.Get<IResidence>(v, "home") != null) continue;
+
+                    if (!p.Homeless.Contains(v))
+                    {
+                        p.Homeless.Add(v);
+                        recovered++;
+                    }
+                }
+
+                if (recovered > 0)
+                {
+                    int team = (p.PlayerLandmassOwner != null) ? p.PlayerLandmassOwner.teamId : -1;
+                    helper.Log($"[HOUSING] team {team}: filed {recovered} villager(s) as homeless who had "
+                               + "no home and were not already in the Homeless list (dropped from a "
+                               + "Home's packed resident list by a reload; see EnsureNoOrphanedHomelessVillagers)");
+                }
+            }
+            catch (Exception e) { LogEx("reconciling orphaned homeless villagers", e); }
+        }
+
+        // A HOUSE'S RESIDENTS ARE EVICTED INTO THE WRONG KINGDOM. Home.OnDisableInternal (verified
+        // against the shipped IL) fires whenever a house is destroyed or otherwise disabled: it
+        // sets each resident's Residence to null and adds them straight to Player.inst.Homeless --
+        // hardcoded, never asked whose house this actually was.
+        //
+        // In single-player Player.inst IS the only kingdom, so this is harmless there. In
+        // multiplayer it is not: every human kingdom's buildings tick on every machine (the same
+        // reason BuildingIsPlayerBuildingHook and KingdomLogTryLogHook exist), so a FOREIGN
+        // kingdom's house being destroyed -- fire, a siege, anything -- correctly nulls the evicted
+        // villagers' Residence everywhere, but files every one of them into the WATCHING machine's
+        // own Homeless list instead of the house's actual owner. Caught from a real session: eight
+        // houses on one player's kingdom were destroyed in under 20 seconds during a siege, and
+        // their evicted villagers were filed under a different player's kingdom entirely.
+        //
+        // EnsureNoOrphanedHomelessVillagers, just above, already limits the damage from this --
+        // its home==null sweep re-files these villagers into their own kingdom's Homeless list
+        // within 60 ticks -- but that is a bandage on the symptom, not the eviction landing right
+        // the instant it happens, and it does nothing for the kingdom that wrongly received them
+        // (their Homeless list now has entries that are not theirs to feed or house).
+        //
+        // Fixed at the source with the same ownership lookup GetPlayerByTeamID already exists for:
+        // resolve the house's actual landmass owner and evict into THEIR Homeless list, replicating
+        // vanilla's own three lines (Residence = null, Homeless.Add, then Residents.Clear() and
+        // HideOverlay() once every resident is moved) with the correct kingdom instead of
+        // Player.inst. Single-player and an unowned/pre-ownership house both fall through to
+        // vanilla unchanged.
+        [HarmonyPatch(typeof(Home), "OnDisableInternal")]
+        public class HomeOnDisableInternalOwnerHook
+        {
+            public static bool Prefix(Home __instance)
+            {
+                if (!NetClient.client.IsConnected || __instance == null) return true;
+
+                try
+                {
+                    Building b = __instance.GetComponent<Building>();
+                    LandmassOwner ground = (b == null) ? null : World.GetLandmassOwner(b.LandMass());
+                    if (ground == null) return true;   // unowned/pre-ownership: vanilla's own path is fine
+
+                    Player owner = GetPlayerByTeamID(ground.teamId);
+                    if (owner == null || owner.Homeless == null || __instance.Residents == null) return true;
+
+                    foreach (Villager resident in __instance.Residents)
+                    {
+                        if (resident == null) continue;
+                        resident.Residence = null;
+                        owner.Homeless.Add(resident);
+                    }
+
+                    __instance.HideOverlay();
+                    __instance.Residents.Clear();
+                    return false;   // vanilla's own body, which would target Player.inst, must not also run
+                }
+                catch (Exception e) { LogEx("Home eviction ownership fix", e); }
+
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Forces a fresh path request for any villager whose deferred path came back from the
+        /// pathing thread and never will, so a silent vanilla pathfinding failure clears in about
+        /// a second instead of however long it takes that villager's own task logic to happen to
+        /// call MoveTo again on its own.
+        ///
+        /// THE BUG, read out of the game's own IL (Trivial.Mono.Cecil against Assembly-CSharp.dll,
+        /// not decompiled source, so this is what actually runs): ThreadedPathing.CalculatePaths
+        /// computes each queued GamePath inside a try that spans the whole calculation, with a
+        /// catch(object) -- a bare catch-all, not catch(Exception) -- wrapped around it. The ONLY
+        /// statement that marks a path done, `path.status = GamePath.Status.Complete`, is the last
+        /// thing inside that try, right before the normal exit. If anything throws before reaching
+        /// it -- a Cell or Building reference read off the main thread while that thread is
+        /// concurrently placing or demolishing something there, an out-of-range read on one of
+        /// PathCell's per-team arrays, or anything else -- the catch swallows it completely: no
+        /// Debug.Log, no crash, no dead worker thread, execution just falls through to the next
+        /// queued path as if this one had never been asked for. The abandoned GamePath is left at
+        /// Status.Finding forever. ThreadedPathing.RequestPath's very first check is
+        /// `if (status == Finding) return false`, so nothing ever asks the pathfinder for that
+        /// villager again, and Villager.ConsumePath does nothing at all while status != Complete.
+        /// The villager just stops, with nothing anywhere to log and nothing anywhere to catch --
+        /// exactly the "time still goes, pawns don't move" signature: the 2026-09-20 00:13:21 to
+        /// 00:14:36 heartbeats, posSum frozen to one decimal place across four consecutive 15s
+        /// samples and 94 villagers on three kingdoms, while fixedTicks and the calendar (year 6
+        /// to 7) kept advancing on schedule the entire time, and nothing matching "Exception" or
+        /// "PATHFIX" appears anywhere in the session log for that whole window -- ruling out an
+        /// ordinary uncaught exception, which Unity logs automatically, and ruling out the
+        /// existing MP-team-array-overflow guard on BakePathingCostsForCell, which never fired
+        /// once this entire session.
+        ///
+        /// This is the same failure class the Ctrl+Shift+R panic key already exists for ("Combat
+        /// isn't synced and can jam the shared pathing so pawns freeze"), but this particular
+        /// incident had no raiders, no dragons and no army activity anywhere in the log, so
+        /// whatever threw inside CalculatePaths this time was not combat. What it actually was is
+        /// not pinned down -- the concurrent house demolition/rebuild churn logged for team 6 in
+        /// the same window is the leading candidate, but that is inference, not proof. This fix
+        /// does not need to know: it treats the stuck STATE as the thing to repair, the same way
+        /// EnsureNoOrphanedHomelessVillagers repairs its symptom without re-running whatever
+        /// produced it.
+        ///
+        /// THE FIX reuses the game's own recovery path instead of inventing one. Villager.MoveTo,
+        /// given a destination equal to the villager's current position, takes an early-exit
+        /// branch (an Object.Equals on the boxed Vector3s) that clears travelPath and returns
+        /// without ever asking the pathfinder for anything -- but on the way there it does one
+        /// thing unconditionally: `if (deferredPath.status != Uninitialized) ignoreDeferred =
+        /// true;`. That flag is exactly what unglues a wedged path, because the very next
+        /// ConsumePath call (every UpdateMind, i.e. next frame) sees ignoreDeferred and calls
+        /// deferredPath.Reset() instead of checking its status -- the only place in the whole
+        /// pipeline that ever clears a stuck Finding back to Uninitialized. This is also,
+        /// empirically, how the logged incident recovered on its own: villagers=94 stayed frozen
+        /// through two more 60-tick reconciliation passes and several player speed-toggle
+        /// attempts, then unfroze between the 00:14:36 and 00:14:51 heartbeats with no speed
+        /// change and no save event in between -- consistent with some ordinary game event (a new
+        /// job, a home reassignment) calling MoveTo on the affected villagers anyway. This sweep
+        /// just does that on purpose, every 60 ticks, instead of waiting on whichever unrelated
+        /// event happens to get there first.
+        ///
+        /// A villager only qualifies with BOTH travelPath empty (nothing left to walk toward
+        /// already) AND deferredPath.status == Finding (a request went out and never came back).
+        /// Complete and Uninitialized are the ordinary "just arrived" and "not going anywhere
+        /// right now" states and must be left alone. deferredPath is private, hence PrivateField.
+        /// </summary>
+        public static void RecoverStrandedVillagerPaths(Player p)
+        {
+            if (p == null || p.Workers == null) return;
+
+            try
+            {
+                int recovered = 0;
+
+                for (int i = 0; i < p.Workers.Count; i++)
+                {
+                    Villager v = p.Workers.data[i];
+                    if (v == null || v.travelPath == null || v.travelPath.Count != 0) continue;
+
+                    GamePath deferred = KaCMultiplayer.Net.PrivateField.Get<GamePath>(v, "deferredPath");
+                    if (deferred == null || deferred.status != GamePath.Status.Finding) continue;
+
+                    // Same position as where the villager already is, deliberately: MoveTo's
+                    // early-exit branch, so this only flips ignoreDeferred and never itself asks
+                    // the pathfinder for anything. See the method comment for why that is enough.
+                    v.MoveTo(v.GetPosition());
+                    recovered++;
+                }
+
+                if (recovered > 0)
+                {
+                    int team = (p.PlayerLandmassOwner != null) ? p.PlayerLandmassOwner.teamId : -1;
+                    helper.Log($"[STUCKPATH] team {team}: unstuck {recovered} villager(s) whose deferred "
+                               + "path never came back from the pathing thread (see "
+                               + "RecoverStrandedVillagerPaths)");
+                }
+            }
+            catch (Exception e) { LogEx("recovering stranded villager paths", e); }
         }
 
         /// <summary>
@@ -4451,6 +5968,21 @@ namespace KaCMultiplayer
             }
         }
 
+        /// <summary>
+        /// A remotely completed or just-restored building can be destroyed between the shared
+        /// completion callback and Player's capacity calculation. Vanilla immediately calls
+        /// GetComponent on it; Unity's destroyed-object null then aborts Player.Update every frame,
+        /// which stops the guest kingdom and makes every villager appear frozen.
+        /// </summary>
+        [HarmonyPatch(typeof(Player), "CalcMaxResources")]
+        public class PlayerCalcMaxResourcesNullGuard
+        {
+            public static bool Prefix(Building __0)
+            {
+                return __0 != null;
+            }
+        }
+
         [HarmonyPatch(typeof(Player), "AddBuilding")]
         public class PlayerAddBuildingHook
         {
@@ -4566,7 +6098,9 @@ namespace KaCMultiplayer
                 // The save case is covered because LoadAtPath wraps the whole unpack in
                 // NetApply.Scope(). Without that, loading a save broadcasts every villager it
                 // contains, and on a populated save that floods Riptide's pending-message table.
-                if (NetApply.InProgress) return;
+                //
+                // An AI kingdom's own villager (host-side AI tick) is not the host's either.
+                if (NetApply.InProgress || Main.AiTicking) return;
 
                 try
                 {
@@ -4846,6 +6380,7 @@ namespace KaCMultiplayer
                 if (first) return;   // the first read sets a baseline, it is not a change
 
                 KaCMultiplayer.Net.PlayerRelations.OnSeasonChanged();
+                KaCMultiplayer.Net.AiDiplomacy.OnSeasonChanged();
             }
             catch (Exception e) { LogEx("season watchers", e); }
         }
@@ -5052,6 +6587,9 @@ namespace KaCMultiplayer
 
                 try { BuildingWatcher.Poll(__instance); }
                 catch (Exception e) { Main.LogEx("building watcher poll", e); }
+
+                // The host's AI kingdoms' buildings, which BuildingWatcher leaves alone.
+                if (NetRouter.IsServer) KaCMultiplayer.Net.AiMirror.Poll(__instance);
             }
         }
 
@@ -5563,20 +7101,24 @@ namespace KaCMultiplayer
                 if (!(NetClient.client.IsConnected || NetHost.IsRunning)) return true; // single-player: vanilla
                 try
                 {
-                    LandmassOwner owner = (Player.inst != null) ? Player.inst.PlayerLandmassOwner : null;
-                    bool localDock = dock != null && owner != null && owner.OwnsLandMass(dock.LandMass());
-                    if (!localDock)
+                    // Foreign merchants are random. Letting every peer run this creates different
+                    // ships, cargo and destinations. The host creates them; guests only create one
+                    // while applying the host's MerchantSpawnMessage.
+                    if (!NetHost.IsRunning && !KaCMultiplayer.Net.NetApply.InProgress)
                     {
-                        // Not headed for one of our docks → it can never be traded with here. Remove it
-                        // cleanly (OnDisable pulls it from ShipSystem.ships; our save-prune covers stragglers).
-                        Main.helper.Log($"[MERCHANT] suppressed foreign merchant bound for non-local dock (landmass {(dock != null ? dock.LandMass() : -1)})");
+                        Main.helper.Log("[MERCHANT] suppressed guest-local random merchant; waiting for host spawn");
                         UnityEngine.Object.Destroy(__instance.gameObject);
-                        return false; // skip vanilla StartSailing
+                        return false;
                     }
-                    Main.helper.Log($"[MERCHANT] foreign merchant sailing to YOUR dock (landmass {dock.LandMass()}), trade will be available on arrival");
                 }
                 catch (Exception e) { Main.helper.Log("MerchantShip.StartSailing MP hook error: " + e.Message); }
-                return true; // local dock (or error): vanilla sets isTargetPlayerDock=true and sails to trade
+                return true;
+            }
+
+            public static void Postfix(MerchantShip __instance, Building dock)
+            {
+                if (!NetHost.IsRunning || KaCMultiplayer.Net.NetApply.InProgress) return;
+                KaCMultiplayer.Net.MerchantSync.Publish(__instance, dock);
             }
         }
 
@@ -5902,10 +7444,28 @@ namespace KaCMultiplayer
         /// The kingdom name for a team, falling back to the player's name and then to the team
         /// number, so a notice always says WHO rather than "a merchant".
         /// </summary>
+        /// <summary>
+        /// This machine's own kingdom, even while Player.inst points somewhere else -- saving swaps
+        /// it to each kingdom in turn, so "is this the local kingdom" cannot be asked of it then.
+        /// </summary>
+        public static Player OwnPlayer()
+        {
+            try
+            {
+                ushort me = NetClient.client.Id;
+                foreach (SessionPlayer kp in kCPlayers.Values)
+                    if (kp != null && !kp.isAI && kp.id == me) return kp.inst;
+            }
+            catch { }
+            return null;
+        }
+
         public static string KingdomNameForTeam(int teamId)
         {
             try
             {
+                if (AiDiplomacy.IsAiTeam(teamId)) return AiDiplomacy.NameFor(teamId);
+
                 foreach (SessionPlayer kp in kCPlayers.Values)
                 {
                     if (kp == null || kp.inst == null || kp.inst.PlayerLandmassOwner == null) continue;
@@ -5937,6 +7497,86 @@ namespace KaCMultiplayer
                 else GameUI.inst.merchantNotification.OnShipDeparture();
             }
             catch (Exception e) { Main.helper.Log("[MERCHANT] notification error: " + e.Message); }
+        }
+
+        // The banner ShowMerchantNotification raises is the SAME ONE FOR EVERYONE: vanilla built it
+        // for a single kind of trader, the wandering NPC that always sails in "from beyond the
+        // sea", and OnShipArrival/ShowNotification just activate that fixed GameObject with no idea
+        // which ship prompted it. A visiting PLAYER's merchant raises the identical banner, so it
+        // reads "Merchant Ship, from beyond the sea" even though it is Jebediah's ship, not a
+        // stranger's -- the kingdom log line right below it already says whose it is correctly
+        // (see the PlayerMerchant arrival hook), the banner just never got told.
+
+        /// <summary>The banner's own body text, found once and kept, so vanilla's wording can be restored later.</summary>
+        private static TextMeshProUGUI _merchantNotificationBody;
+        private static string _merchantNotificationOriginalBody;
+
+        /// <summary>
+        /// Swaps the merchant banner's body text to name the visiting kingdom, or puts vanilla's own
+        /// wording back when <paramref name="traderName"/> is null.
+        ///
+        /// Finds the text component by its CONTENT rather than by path or index, matching whichever
+        /// child currently contains vanilla's own "beyond the sea" wording, so a bundle whose
+        /// hierarchy does not match this build's assumption is a silent no-op instead of a
+        /// mis-edited label. Original text is captured once, the first time this ever runs, so a
+        /// second player-merchant arrival before the first one's departure restores the SAME
+        /// original rather than whatever the last visitor's name was.
+        /// </summary>
+        public static void SetMerchantNotificationTrader(string traderName)
+        {
+            try
+            {
+                if (GameUI.inst == null || GameUI.inst.merchantNotification == null) return;
+                GameObject content = GameUI.inst.merchantNotification.Content;
+                if (content == null) return;
+
+                if (_merchantNotificationBody == null)
+                {
+                    foreach (TextMeshProUGUI t in content.GetComponentsInChildren<TextMeshProUGUI>(true))
+                    {
+                        if (t.text != null && t.text.IndexOf("beyond the sea", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            _merchantNotificationBody = t;
+                            _merchantNotificationOriginalBody = t.text;
+                            break;
+                        }
+                    }
+                    if (_merchantNotificationBody == null) return;   // wording not found; leave vanilla alone
+                }
+
+                _merchantNotificationBody.text = traderName == null
+                    ? _merchantNotificationOriginalBody
+                    : (traderName + "'s merchant.\nSailing to dock...");
+            }
+            catch (Exception e) { Main.helper.Log("[MERCHANT] notification text swap error: " + e.Message); }
+        }
+
+        /// <summary>
+        /// Stops one kingdom's news from appearing in everybody's kingdom log.
+        ///
+        /// KingdomLog.TryLog is the single funnel behind "our peasants are unhappy", "a building
+        /// caught fire", a raid, a plague, every line the log panel shows -- called from deep
+        /// inside whichever Player's Update happens to be running, for whichever landmass that
+        /// event belongs to. Vanilla's own filter skips only AI-owned land, which in single player
+        /// is the only thing worth skipping: the other option was always yours. In this mod every
+        /// human kingdom's Update runs on every machine, so "not AI" is true for all of them, and
+        /// nothing before this stopped a machine from announcing news about kingdoms it does not
+        /// own into its own, single, shared log panel.
+        ///
+        /// landmass of -1 is vanilla's own "not about one kingdom" case (global weather, and
+        /// similar) and is left alone; everything else is asked whether it is actually ours before
+        /// vanilla's own AI check even runs.
+        /// </summary>
+        [HarmonyPatch(typeof(KingdomLog), "TryLog")]
+        public class KingdomLogTryLogHook
+        {
+            public static bool Prefix(int landmass)
+            {
+                if (!NetClient.client.IsConnected) return true;
+                if (landmass < 0) return true;
+
+                return IsLocalLandmass(landmass);
+            }
         }
 
         /// <summary>
@@ -6002,10 +7642,11 @@ namespace KaCMultiplayer
                 {
                     if (__instance.type != ShipBase.ShipType.PlayerMerchant) return;
 
-                    // Transit dump, for diagnosing a merchant that never reaches its dock. Behind the
-                    // dev switch because it writes per merchant every couple of seconds, and this
-                    // project has twice had a per-tick log bury everything else in a session.
-                    if (!__instance.arrived && Main.DevTestBuild)
+                    // Transit dump, for diagnosing a merchant that never reaches its dock. Behind
+                    // its own switch (not DevTestBuild -- see LogMerchantPathing's own doc comment)
+                    // because it writes per merchant every couple of seconds, and this project has
+                    // twice had a per-tick log bury everything else in a session.
+                    if (!__instance.arrived && Main.LogMerchantPathing)
                         Main.LogMerchantTransit(__instance, "player");
 
                     int localTeam = (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
@@ -6023,6 +7664,7 @@ namespace KaCMultiplayer
                         if (Main._loggedMerchantArrivals.Remove(__instance.guid))
                         {
                             Main.SetMerchantIssueButton(__instance, false);
+                            Main.SetMerchantNotificationTrader(null);   // back to vanilla's own wording
                             Main.ShowMerchantNotification(false);
                         }
                         return;
@@ -6049,9 +7691,15 @@ namespace KaCMultiplayer
                     // That walk is now covered (see MerchantNotificationTrackPlayerMerchantHook), so
                     // the banner can be raised honestly: a visiting player's merchant announces
                     // itself exactly as an ordinary one does, and the view button goes to the ship.
+                    //
+                    // Named rather than left as vanilla's "from beyond the sea": that wording is
+                    // right for the wandering NPC trader it was written for, and just wrong for a
+                    // neighbour's own ship. SetMerchantNotificationTrader before ShowNotification
+                    // runs, so the banner shows the right name from the very first frame it appears.
+                    string trader = Main.KingdomNameForTeam(__instance.teamID);
+                    Main.SetMerchantNotificationTrader(trader);
                     Main.ShowMerchantNotification(true);
 
-                    string trader = Main.KingdomNameForTeam(__instance.teamID);
                     KingdomLog.TryLog("mpMerchant" + __instance.guid,
                                       trader + "'s merchant has docked at your port and is ready to trade.",
                                       KingdomLog.LogStatus.Neutral, 0f);
@@ -6127,7 +7775,7 @@ namespace KaCMultiplayer
         {
             public static void Postfix(MerchantShip __instance)
             {
-                if (!Main.DevTestBuild) return;   // per-frame diagnostic; off in player builds
+                if (!Main.LogMerchantPathing) return;   // per-frame diagnostic; off by default
                 if (!NetClient.client.IsConnected || __instance == null) return;
                 if (__instance.arrived) return; // only diagnosing the "never reaches dock" phase
                 Main.LogMerchantTransit(__instance, "foreign");
@@ -6500,7 +8148,7 @@ namespace KaCMultiplayer
                 {
                     int localTeam = (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
                         ? Player.inst.PlayerLandmassOwner.teamId : int.MinValue;
-                    if (teamId != localTeam) return; // only broadcast YOUR armies (raiders are suppressed; creative is local-team anyway)
+                    if (teamId != localTeam && !(NetRouter.IsServer && teamId == 1)) return;
                     Main.helper.Log($"[ARMY] broadcasting your army spawn: type {at} team {teamId} guid {__result.guid} at {pos}");
                     KaCMultiplayer.Net.NetRouter.Send(new KaCMultiplayer.Net.Messages.ArmySpawnMessage { Army = __result.guid, Position = pos, TeamId = teamId, ArmyType = (int)at });
                 }
@@ -6549,7 +8197,7 @@ namespace KaCMultiplayer
                 {
                     int localTeam = (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
                         ? Player.inst.PlayerLandmassOwner.teamId : int.MinValue;
-                    if (army.teamId != localTeam) return;   // not ours to announce
+                    if (army.teamId != localTeam && !(NetRouter.IsServer && army.teamId == 1)) return;
 
                     KaCMultiplayer.Net.NetRouter.Send(
                         new KaCMultiplayer.Net.Messages.ArmyDespawnMessage { Army = army.guid });
@@ -6579,10 +8227,8 @@ namespace KaCMultiplayer
                     // placement failed. Unowned means nobody foreign owns it, so let it tick.
                     if (World.GetLandmassOwner(b.LandMass()) == null) return true;
 
-                    int team = b.TeamID();
-                    int localTeam = (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
-                        ? Player.inst.PlayerLandmassOwner.teamId : int.MinValue;
-                    if (team >= 5 && team != localTeam) return false; // foreign player's barracks: not ours to simulate
+                    // Another player's barracks, or an AI's on a guest: not ours to simulate.
+                    if (Main.IsForeignTeam(b.TeamID())) return false;
                 }
                 catch (Exception e)
                 {
@@ -6613,8 +8259,38 @@ namespace KaCMultiplayer
         {
             private static int knownSpeed = -1;
 
+            /// <summary>
+            /// A MENU DOES NOT TOUCH THE CLOCK AT ALL ANY MORE, not even locally.
+            ///
+            /// Opening the pause menu, the share screen or the banner picker called this with 0,
+            /// and closing it called this again with whatever speed had been saved on the way in.
+            /// Both were real SetSpeed calls that really changed Time.timeScale; they had only
+            /// stopped being BROADCAST (see PlayingModeOnClickedMenuHook for why). What remained
+            /// was still a local pause: opening your own menu stopped your own world while every
+            /// other player's kept running, so closing it again meant looking at a world that had
+            /// moved on without you, over something that was never a deliberate pause at all.
+            ///
+            /// Suppressed here at the source rather than only on the wire, so the clock never
+            /// stops for this reason on any machine. localMenuSpeedChange is true for exactly the
+            /// narrow window those four call sites open it for; a genuine player-driven speed
+            /// change, local or arriving from a peer, never sets it and reaches SetSpeed exactly
+            /// as before.
+            /// </summary>
+            public static bool Prefix()
+            {
+                return !Main.localMenuSpeedChange;
+            }
+
             public static void Postfix(int idx)
             {
+                // THE PREFIX ABOVE ALREADY SKIPPED THIS CALL, and Harmony still runs a Postfix
+                // when its Prefix returns false, so this still has to check the same flag before
+                // touching anything. Without this, a suppressed menu pause would still record
+                // Main.CurrentSpeed as the value it was ASKED for (0) rather than the value the
+                // clock actually stayed at, which is exactly the kind of lie that made the old
+                // "[SPEED] menu speed kept local" line look like a pause had happened at all.
+                if (Main.localMenuSpeedChange) return;
+
                 if (!NetClient.client.IsConnected) { knownSpeed = idx; return; }
 
                 bool changed = idx != knownSpeed;
@@ -6635,12 +8311,6 @@ namespace KaCMultiplayer
                     return; // came from a peer, do not re-broadcast (avoids ping-pong)
                 }
 
-                if (Main.localMenuSpeedChange)
-                {
-                    Main.helper.Log($"[SPEED] menu speed={idx} kept local (not broadcast)");
-                    return; // opening or closing your own menu is nobody else's business
-                }
-
                 if (!changed) return; // local call but speed didn't actually change, don't spam
 
                 Main.helper.Log($"[SPEED] local speed change -> {idx}, broadcasting");
@@ -6648,7 +8318,7 @@ namespace KaCMultiplayer
             }
         }
 
-        // ONE PLAYER'S MENU MUST NOT STOP EVERYONE ELSE'S GAME.
+        // ONE PLAYER'S MENU MUST NOT STOP EVERYONE ELSE'S GAME -- OR THEIR OWN, ANY MORE.
         //
         // Opening the in-game menu runs PlayingMode.OnClickedMenu, which ends with
         // SpeedControlUI.SetSpeed(0); closing it runs MainMenuMode.Shutdown, which restores the speed
@@ -6657,10 +8327,18 @@ namespace KaCMultiplayer
         // froze every other player, and, worse, closing the menu again pushed YOUR old speed onto
         // everyone, overriding a pause somebody else had deliberately set.
         //
-        // The menu still stops time for the player who opened it. It just stops being everyone's
-        // problem. The three entry points are the ones that pause on the way in (menu, share, banner);
-        // the exit is scoped to the two states the game itself restores speed for, so starting a game
-        // from the main menu is untouched.
+        // FIRST FIX: the three entry points below (menu, share, banner) stopped BROADCASTING that
+        // local SetSpeed(0), so the menu no longer stopped anyone else's game. It still stopped
+        // YOUR OWN: SpeedControlUI.SetSpeed(0) is still a real call to Unity's Time.timeScale, only
+        // unheard by everyone else, so closing the menu again meant looking at a world that had kept
+        // moving without you -- a smaller version of the exact problem this was meant to solve, and
+        // still enough to drift your calendar year from theirs over a long session.
+        //
+        // SECOND FIX, same flag: SpeedControlUISetSpeedHook's own Prefix now reads
+        // localMenuSpeedChange too and skips SetSpeed's body entirely while it is set, so opening or
+        // closing one of these three no longer touches Time.timeScale on ANY machine, including this
+        // one. The exit is scoped to the two states the game itself restores speed for, so starting a
+        // game from the main menu is untouched.
         //
         // A MENU IS NOT A PAUSE, AND THE WORLD ONLY STOPS WHEN SOMEBODY STOPS IT.
         //
@@ -6673,9 +8351,8 @@ namespace KaCMultiplayer
         // two worlds to disagree about what had happened and when.
         //
         // So it is gone, and the rule is the simple one: time stops when a player sets the speed to
-        // pause, and at no other moment. Only the suppression below remains, which is the original
-        // fix and a smaller claim, that YOUR menu pauses YOUR game and says nothing to anybody
-        // else.
+        // pause, and at no other moment -- not even the moment of opening the menu that shows that
+        // choice. Only the suppression below remains.
         [HarmonyPatch(typeof(PlayingMode), "OnClickedMenu")]
         public class PlayingModeOnClickedMenuHook
         {
@@ -6764,9 +8441,9 @@ namespace KaCMultiplayer
             {
                 // Single-player path is untouched; only suppress while in a multiplayer session.
                 if (!NetClient.client.IsConnected) return true;
-                if (Main.RaidsEnabled) return true;   // deliberately switched on for testing
+                if (Main.RaidsEnabled && NetRouter.IsServer) return true;
 
-                Main.helper.Log("[RAID] SetupRaid suppressed (viking raids disabled in MP)");
+                Main.helper.Log("[RAID] SetupRaid suppressed here (host is raid authority)");
                 return false; // skip the original, no raid happens
             }
         }
@@ -6779,10 +8456,111 @@ namespace KaCMultiplayer
             public static bool Prefix()
             {
                 if (!NetClient.client.IsConnected) return true;
-                if (Main.RaidsEnabled) return true;
+                if (Main.RaidsEnabled && NetRouter.IsServer) return true;
 
-                Main.helper.Log("[RAID] SpawnVikingBoat suppressed (viking raids disabled in MP)");
+                Main.helper.Log("[RAID] SpawnVikingBoat suppressed here (host is raid authority)");
                 return false; // skip the original, no boat spawns
+            }
+        }
+
+        private static Player _raidPlayerBeforeYear;
+        private static int _raidKingdomCursor;
+
+        /// <summary>
+        /// Only the host advances the shared raid timer. Before vanilla plans a raid, Player.inst
+        /// is rotated to one active kingdom; RaidLocalIslandsOnlyHook then makes that kingdom the
+        /// raid's sole target instead of mixing several owners into one planner run.
+        /// </summary>
+        [HarmonyPatch(typeof(RaiderSystem), "OnNewYear")]
+        public class RaiderOnNewYearAuthorityHook
+        {
+            public static bool Prefix()
+            {
+                if (!NetClient.client.IsConnected) return true;
+                if (!Main.RaidsEnabled || !NetRouter.IsServer) return false;
+
+                _raidPlayerBeforeYear = Player.inst;
+                try
+                {
+                    List<Player> eligible = new List<Player>();
+                    foreach (SessionPlayer sp in kCPlayers.Values)
+                        if (sp != null && !sp.isGhost && sp.inst != null
+                            && sp.inst.PlayerLandmassOwner != null && sp.inst.keep != null)
+                            eligible.Add(sp.inst);
+
+                    if (eligible.Count > 0)
+                    {
+                        Player.inst = eligible[_raidKingdomCursor++ % eligible.Count];
+                        helper.Log("[RAID] host authority considering team " +
+                            Player.inst.PlayerLandmassOwner.teamId + " this year");
+                    }
+                }
+                catch (Exception e) { LogEx("[RAID] choosing target kingdom", e); }
+                return true;
+            }
+
+            // A Postfix, not a Finalizer: the game ships Harmony 1.2, which has no finalizers and
+            // silently never calls a method by that name. As a Finalizer this restore never ran,
+            // so the first year the rotation picked a guest, the host's Player.inst stayed on that
+            // guest's stand-in kingdom for good -- the host could no longer build ("Ocean" as its
+            // island, nothing affordable), and Villager.UpdateAnim threw every frame reading the
+            // stand-in's null walkBounce, which skipped the rest of Player.Update each time.
+            //
+            // A Postfix does not run if OnNewYear throws, so RestoreRaidPlayerIfStranded (called
+            // every frame from Update) puts it back in that case, at most a frame later.
+            public static void Postfix()
+            {
+                RestoreRaidPlayerIfStranded();
+            }
+        }
+
+        /// <summary>
+        /// Puts Player.inst back if the raid planner's rotation left it on another kingdom (see
+        /// RaiderOnNewYearAuthorityHook). Every frame from Update; a no-op unless a raid year is
+        /// half-finished.
+        /// </summary>
+        private static void RestoreRaidPlayerIfStranded()
+        {
+            if (_raidPlayerBeforeYear == null) return;
+            Player.inst = _raidPlayerBeforeYear;
+            _raidPlayerBeforeYear = null;
+        }
+
+        [HarmonyPatch(typeof(RaiderSystem), "Update")]
+        public class RaiderUpdateAuthorityHook
+        {
+            public static bool Prefix()
+            {
+                return !NetClient.client.IsConnected || (Main.RaidsEnabled && NetRouter.IsServer);
+            }
+        }
+
+        [HarmonyPatch(typeof(ShipBase), "Tick")]
+        public class RaiderShipTickAuthorityHook
+        {
+            public static bool Prefix(ShipBase __instance)
+            {
+                return KaCMultiplayer.Net.RaiderSync.ShouldTickShip(__instance);
+            }
+        }
+
+        /// <summary>Foreign merchants and Viking transports are host-owned, so their removal is too.</summary>
+        [HarmonyPatch(typeof(ShipSystem), "Remove")]
+        public class AuthoritativeShipRemoveHook
+        {
+            public static void Prefix(ShipBase s)
+            {
+                if (!NetRouter.IsServer || !NetRouter.IsConnected || NetApply.InProgress || s == null) return;
+                if (LoadSaveOverrides.SessionSave.Unpacking) return;
+                if (s.type != ShipBase.ShipType.Merchant
+                    && s.type != ShipBase.ShipType.VikingTroopTransport
+                    && s.type != ShipBase.ShipType.OgreTroopTransport) return;
+
+                NetRouter.Broadcast(new KaCMultiplayer.Net.Messages.ShipDespawnMessage
+                {
+                    Origin = 0,
+                    Ship = s.guid
+                });
             }
         }
 
@@ -6986,12 +8764,17 @@ namespace KaCMultiplayer
                 return;
             }
 
-            NetRouter.Send(new KaCMultiplayer.Net.Messages.DragonSpawnMessage
+            var message = new KaCMultiplayer.Net.Messages.DragonSpawnMessage
             {
                 Kind = kind,
                 Dragon = id,
                 X = start.x, Y = start.y, Z = start.z
-            });
+            };
+
+            // The host is already the authority. Send straight to guests instead of routing the
+            // spawn through its own local client and back through the server.
+            if (NetRouter.IsServer) NetRouter.Broadcast(message);
+            else NetRouter.Send(message);
         }
 
         [HarmonyPatch(typeof(DragonSpawn), "SpawnSiegeDragon")]
@@ -7054,6 +8837,44 @@ namespace KaCMultiplayer
         /// alone deliberately: it is a developer spawn, and someone testing wants it where they
         /// asked for it.
         /// </summary>
+        /// <summary>
+        /// "DRAGON SIGHTED!" goes up when the host's does, on every screen, and a guest's own
+        /// per-frame check no longer raises it by itself. See Net/DragonAlerts.cs.
+        /// </summary>
+        [HarmonyPatch(typeof(DragonNotification), "ShowBanner")]
+        public class DragonNotificationShowBannerHook
+        {
+            public static bool Prefix()
+            {
+                if (!NetClient.client.IsConnected || NetRouter.IsServer) return true;
+                return KaCMultiplayer.Net.DragonAlerts.ApplyingHostBanner;
+            }
+
+            public static void Postfix()
+            {
+                if (!NetClient.client.IsConnected || !NetRouter.IsServer) return;
+                KaCMultiplayer.Net.DragonAlerts.HostShowedBanner();
+            }
+        }
+
+        /// <summary>
+        /// On a guest, whether dragons can come yet is the host's answer, not a count of this
+        /// machine's own people; it decides whether the minimap's dragon countdown shows at all.
+        /// See Net/DragonAlerts.cs.
+        /// </summary>
+        [HarmonyPatch(typeof(DragonSpawn), "AllowSpawning")]
+        public class DragonSpawnAllowSpawningHook
+        {
+            public static bool Prefix(ref bool __result)
+            {
+                bool? host = KaCMultiplayer.Net.DragonAlerts.HostAllowsDragons;
+                if (host == null) return true;
+
+                __result = host.Value;
+                return false;
+            }
+        }
+
         [HarmonyPatch(typeof(DragonSpawn), "SpawnBabyDragonToVisit", new Type[] { typeof(Vector3) })]
         public class DragonSpawnSpawnBabyDragonToVisitHook
         {
@@ -7301,6 +9122,50 @@ namespace KaCMultiplayer
         ///
         /// Returns null on any failure, which the caller must treat as "do not send": a truncated
         /// save unpacks into a broken world rather than failing cleanly.
+        ///
+        /// CONFIRMED, NOT YET FIXED: for every kingdom that is not this machine's own, what gets
+        /// packed here is this machine's own simulated MIRROR of that kingdom, not that kingdom's
+        /// real state -- and for anything living in a job-worked storage building, that mirror is
+        /// unreliable in exactly the way <see cref="KaCMultiplayer.Net.PlayerRelations.TakeFrom"/>'s
+        /// doc comment already lays out for the "10 offered, 0 paid" diplomacy bug:
+        /// <see cref="JobUpdateAssignmentForeignHook"/> deliberately never lets this machine assign
+        /// or reassign a job belonging to a foreign kingdom -- hauling, delivery and production jobs
+        /// alike -- so those buildings' own <c>Deposit</c>/<c>resourceStack</c>/stack fields only
+        /// ever hold whatever they had at the moment this machine's copy was last accurate (usually
+        /// session start, since nothing after that keeps a foreign machine's copy in step), no
+        /// matter how long the real owner has been playing and stockpiling on their own machine.
+        ///
+        /// This method is called ONLY on the host (see <c>SessionHandlers.QueueResumeTransfer</c>,
+        /// the sole caller besides the AutoTest harness), and it is called for BOTH a brand-new
+        /// joiner and a player reconnecting mid-session (same call site, same
+        /// <c>GameState.IsPlayMode()</c> branch) -- so a returning player's own kingdom, packed
+        /// here from the HOST's stale mirror of it, is exactly what <c>SessionSave.Unpack</c> then
+        /// hands back to them as their own <see cref="Player.PlayerSaveData"/>
+        /// (<c>this.PlayerSaveData = localData</c>), overwriting the real, correctly-simulated
+        /// state their own (now-destroyed, disconnect always returns to the main menu) client
+        /// instance had. Their own kingdom's Gold survives because <c>LandmassOwner.Gold</c> is a
+        /// plain int kept correct by determinism, not a storage building anyone has to work a job
+        /// to fill -- see MoveResource's own doc comment. This is the real mechanism behind the
+        /// "storage areas overridden with an empty one on reload, keeps the host's stuff, resets
+        /// everyone else's" report from a live session (BlueJay, Discord, 2026-09-21); stone's own
+        /// resistance to it was investigated but NOT conclusively pinned down (Quarry unifies
+        /// producer and storage in one building, with a plain <c>int</c> save field rather than
+        /// Stockpile's stack array -- confirmed via Cecil -- but Quarry's own OnAddJobs still goes
+        /// through the same FreeResourceGathererJob/DeliveryJob machinery Stockpile-fed resources
+        /// do, so that structural difference is suggestive, not proven, as the reason).
+        ///
+        /// NOT FIXED HERE. The one existing channel that could supply a trustworthy per-kingdom
+        /// total instead of this machine's own mirror --
+        /// <see cref="KaCMultiplayer.Net.Messages.EconomySnapshotMessage"/>, applied by
+        /// NetRegistrations.ApplyEconomySnapshot onto <c>player.inst.resourcesTotal</c> -- turns out
+        /// to be dead: its only sender, <c>BroadcastOwnResources</c> a few hundred lines up, is never
+        /// called anywhere in this codebase, so that field is never actually kept live for a foreign
+        /// kingdom today. Even wired up, it is a TOTAL, not a per-building breakdown, so using it to
+        /// correct what gets packed here would mean guessing which of a kingdom's storage buildings
+        /// the shortfall belongs in -- and doing that with any confidence needs to be tested against
+        /// a real multiplayer session, not written blind. Left as a clearly-marked, fully-diagnosed
+        /// gap rather than a guessed-at fix; see the packed-total log line in
+        /// <c>SessionSave.Pack</c> for the numbers to check next time this is reported.
         /// </summary>
         public static byte[] PackLiveSnapshot()
         {
@@ -7598,6 +9463,9 @@ namespace KaCMultiplayer
         [HarmonyPatch(typeof(LoadSave), "Save")]
         public class LoadSaveSaveHook
         {
+            /// <summary>True while this Prefix is running the game's own Save (see Prefix).</summary>
+            [ThreadStatic] private static bool running;
+
             /// <summary>
             /// Drops destroyed ship corpses before the game packs the save.
             ///
@@ -7618,35 +9486,51 @@ namespace KaCMultiplayer
             /// (2026-09-05). A Prefix runs before Save does anything, therefore before Pack, and
             /// needs none of it.
             ///
-            /// Unconditional, matching what shipped: the factory pruned on every save, not only
-            /// multiplayer ones, and the crash it prevents is a vanilla one.
-            /// </summary>
-            static void Prefix()
-            {
-                // Multiplayer only. The crash it prevents is in vanilla's own Pack, but every report
-                // of it came from a session, and quietly repairing single-player saving is exactly
-                // the kind of uninvited change this mod is not supposed to make. Reported upstream
-                // instead, so it can be fixed where it belongs.
-                if (!Main.InMultiplayer) return;
-
-                try { LoadSaveOverrides.SessionSave.PruneDestroyedShips(); }
-                catch (Exception e) { Main.LogEx("pruning destroyed ships before a save", e); }
-            }
-
-            /// <summary>
-            /// Never let a failing save re-throw into the game's autosave call and stall the whole
+            /// Multiplayer only. The crash it prevents is in vanilla's own Pack, but every report of
+            /// it came from a session, and quietly repairing single-player saving is exactly the kind
+            /// of uninvited change this mod is not supposed to make. Reported upstream instead, so it
+            /// can be fixed where it belongs.
+            ///
+            /// SECOND JOB: never let a failing save re-throw into its caller and stall the whole
             /// simulation (the documented freeze-on-failed-autosave: game-time stops, villagers halt,
-            /// the host "cannot build anything"). The game's LoadSave.Save catch re-throws, and this
-            /// hook's transpiler form, unlike the old Prefix, no longer swallowed it. A failed save is
-            /// logged and abandoned for this cycle; the next autosave retries. A missed autosave is
-            /// recoverable; a frozen host session is not. Pairs with MakeSaveContainer's ship prune,
-            /// which keeps most saves from failing in the first place.
+            /// the host "cannot build anything"). Vanilla's Save catches, logs to the kingdom log,
+            /// and RETHROWS, straight into LoadSave.AutoSave. A failed save is logged and abandoned
+            /// for this cycle instead; the next autosave retries. A missed autosave is recoverable; a
+            /// frozen host session is not.
+            ///
+            /// This used to be a Finalizer, which the game's Harmony 1.2 does not have: it was
+            /// silently never called, and the protection never existed. Harmony 1.2 has no other way
+            /// to catch what the original throws, so this Prefix runs the game's own Save itself,
+            /// inside a try. That call comes back through this Prefix (the patch replaces the method
+            /// for every caller), which is what <c>running</c> is for: the second pass prunes and
+            /// lets the original run. Returns null on failure, which every caller that matters
+            /// (AutoSave, ReturnSave, the menu saves) discards.
             /// </summary>
-            static Exception Finalizer(Exception __exception)
+            static bool Prefix(string pathOverride, UnityEngine.Events.UnityAction onCompleteCallback,
+                               ref System.Threading.Thread __result)
             {
-                if (__exception != null)
-                    Main.LogEx("save aborted (swallowed so the simulation keeps running)", __exception);
-                return null;
+                if (!Main.InMultiplayer) return true;
+
+                if (running)
+                {
+                    try { LoadSaveOverrides.SessionSave.PruneDestroyedShips(); }
+                    catch (Exception e) { Main.LogEx("pruning destroyed ships before a save", e); }
+                    return true;   // the call below: run the game's own Save
+                }
+
+                running = true;
+                try
+                {
+                    __result = LoadSave.Save(pathOverride, onCompleteCallback);
+                }
+                catch (Exception e)
+                {
+                    Main.LogEx("save aborted (swallowed so the simulation keeps running)", e);
+                    __result = null;
+                }
+                finally { running = false; }
+
+                return false;   // already done, above
             }
         }
 
@@ -7732,6 +9616,17 @@ namespace KaCMultiplayer
                     if (liveries != null && owner.bannerIdx >= 0 && owner.bannerIdx < liveries.Count)
                         return true;   // in range, let vanilla paint it
 
+                    // The doc comment above has always claimed a sweep fixes this; nothing actually
+                    // asked for one. MarkBannersDirty was only ever called from a banner actually
+                    // being SET (SetKingdomBanner) or a landmass changing hands (TakeOwnership) --
+                    // never from here, the one place that KNOWS a flag was just left blank. A unit
+                    // caught by this before its team's own SetIndexedBanner has run had no reason
+                    // to ever be repainted again once that finally happens elsewhere in the world,
+                    // unless something else coincidentally re-set a banner or a landmass changed
+                    // hands afterwards. On a long session where nobody's banner changes twice, that
+                    // coincidence may never come, and this unit's flag stays blank for good.
+                    try { Main.MarkBannersDirty(); } catch { }
+
                     if (!reported)
                     {
                         reported = true;
@@ -7765,10 +9660,17 @@ namespace KaCMultiplayer
         [HarmonyPatch(typeof(PathCell), "BakePathingCostsForCell")]
         public class PathCellBakeTeamSlotsHook
         {
+            /// <summary>True while this Prefix is running the game's own bake (see the end of Prefix).</summary>
+            [ThreadStatic] private static bool baking;
+
             public static bool Prefix(Cell cell)
             {
                 // SP keeps the native size-5 arrays (teams 0..4), nothing to fix there.
                 if (!(NetClient.client.IsConnected || NetHost.IsRunning)) return true;
+
+                // The call at the end of this Prefix comes back through here: let the game bake.
+                if (baking) return true;
+
                 try
                 {
                     PathCell pc = World.inst.GetPathCell(cell);
@@ -7783,7 +9685,17 @@ namespace KaCMultiplayer
                     }
                 }
                 catch (Exception e) { Main.helper.Log("[PATHFIX] enlarge error: " + e.Message); }
-                return true; // let the original bake run, it now fills all enlarged team slots
+
+                // Now the game's own bake, which fills all the enlarged team slots, run from here
+                // so that a throw can be caught (see ReportBakeFailure). Harmony 1.2 has no other
+                // way to catch what an original throws; the Finalizer that used to try is not a
+                // thing in that version and was never called.
+                baking = true;
+                try { PathCell.BakePathingCostsForCell(cell); }
+                catch (Exception e) { ReportBakeFailure(e); }
+                finally { baking = false; }
+
+                return false;   // already baked, above
             }
 
             /// <summary>
@@ -7807,18 +9719,14 @@ namespace KaCMultiplayer
             /// </summary>
             private static bool reportedBakeFailure;
 
-            static Exception Finalizer(Exception __exception, Cell cell)
+            // Swallowed: a mis-costed cell is recoverable, a failed load is not.
+            private static void ReportBakeFailure(Exception e)
             {
-                if (__exception == null) return null;
-
-                if (!reportedBakeFailure)
-                {
-                    reportedBakeFailure = true;
-                    Main.helper.Log("[PATHFIX] baking pathing for a cell threw, most likely a gate or keep "
-                                    + "on land with no owner yet; skipping that cell and carrying on. "
-                                    + "Only reported once per session. First error: " + __exception.Message);
-                }
-                return null;   // swallowed: a mis-costed cell is recoverable, a failed load is not
+                if (reportedBakeFailure) return;
+                reportedBakeFailure = true;
+                Main.helper.Log("[PATHFIX] baking pathing for a cell threw, most likely a gate or keep "
+                                + "on land with no owner yet; skipping that cell and carrying on. "
+                                + "Only reported once per session. First error: " + e.Message);
             }
         }
 
@@ -8040,6 +9948,16 @@ namespace KaCMultiplayer
             {
                 int teamId = p.PlayerLandmassOwner.teamId;
 
+                // AI KINGDOMS' BUILDINGS RIDE IN THE HOST'S OWN RECORD. Every record keeps only its
+                // own team's buildings, and an AI kingdom is nobody's record, so its buildings were
+                // in no save at all: load one and the AI came back (its brain is saved separately,
+                // in AIBrainsSaveData) to an island of bare roads. Single-player keeps AI buildings
+                // in the one Player's save, and on the host AI kingdoms share the host's Player the
+                // same way, so that is where they go here. ProcessBuilding restores whatever a
+                // record holds without a team check, and the AI's own LandmassOwner (restored from
+                // AIBrainsSaveData) owns the island again, so each comes back as the AI's.
+                bool includeAi = NetRouter.IsServer && p == OwnPlayer();
+
                 data.structures = new List<Building.BuildingSaveData[]>();
                 data.subStructures = new List<Building.BuildingSaveData[]>();
 
@@ -8050,8 +9968,8 @@ namespace KaCMultiplayer
                 // rather than of any list the player holds.
                 World.inst.ForEachTile(0, 0, World.inst.GridWidth, World.inst.GridHeight, delegate (int x, int z, Cell cell)
                 {
-                    PackCell(data.structures, cell.OccupyingStructure, cell, teamId, "building");
-                    PackCell(data.subStructures, cell.SubStructure, cell, teamId, "sub-building");
+                    PackCell(data.structures, cell.OccupyingStructure, cell, teamId, includeAi, "building");
+                    PackCell(data.subStructures, cell.SubStructure, cell, teamId, includeAi, "sub-building");
                 });
 
                 if (destroyedSkipped > 0 || unpackableSkipped > 0)
@@ -8066,7 +9984,7 @@ namespace KaCMultiplayer
             /// <paramref name="into"/>, adding nothing when the cell holds none of theirs.
             /// </summary>
             private static void PackCell(
-                List<Building.BuildingSaveData[]> into, List<Building> onCell, Cell cell, int teamId, string kind)
+                List<Building.BuildingSaveData[]> into, List<Building> onCell, Cell cell, int teamId, bool includeAi, string kind)
             {
                 if (onCell == null) return;
 
@@ -8083,14 +10001,16 @@ namespace KaCMultiplayer
                         // fix for a total save failure seen in the wild (Rednax, 2026-09-02): the two
                         // filters below used to run OUTSIDE the try, so reading .transform on a
                         // destroyed building threw past PackCell and aborted the entire save. The
-                        // player kept playing, because the Finalizer on LoadSave.Save swallows the
-                        // throw rather than stalling the sim, so the only symptom was a run of
-                        // "Problem during save" and, silently, no autosave ever reaching disk. Same
+                        // only symptom was a run of "Problem during save" and, silently, no
+                        // autosave ever reaching disk. (LoadSaveSaveHook now also swallows a
+                        // failed save so it cannot stall the sim; its old Finalizer form never
+                        // ran under the game's Harmony 1.2.) Same
                         // family as the destroyed-ship corpses PruneDestroyedShips clears out of
                         // ShipSystem.ships.
                         if (building == null) { destroyedSkipped++; continue; }
 
-                        if (building.TeamID() != teamId) continue;
+                        int buildingTeam = building.TeamID();
+                        if (buildingTeam != teamId && !(includeAi && AiDiplomacy.IsAiTeam(buildingTeam))) continue;
                         if (Vector3.Distance(building.transform.position.xz(), cell.Position.xz()) > AnchorTolerance) continue;
 
                         Building.BuildingSaveData saved = new Building.BuildingSaveData().Pack(building);
@@ -8212,15 +10132,29 @@ namespace KaCMultiplayer
         /// </summary>
         private static class SingletonRewrite
         {
-            /// <summary>Every declared, non-abstract instance method on <paramref name="owner"/>.</summary>
-            public static IEnumerable<MethodBase> InstanceMethodsOf(Type owner, string label)
+            /// <summary>
+            /// Every declared, non-abstract instance method on <paramref name="owner"/>, except any
+            /// named in <paramref name="except"/>.
+            ///
+            /// The exclusion exists for a method whose OWN JOB is to compare something to
+            /// Player.inst rather than to read Player.inst's data: Building.IsPlayerBuilding is
+            /// "does Player.inst own this building", and rewriting that Player.inst to mean "this
+            /// building's own owner" turns the question into "does this building's owner own this
+            /// building", which is always true. Every caller downstream of a method like that reads
+            /// a broken constant instead of a real answer, silently, because the rewrite still
+            /// compiles and still runs; nothing about it looks wrong until you already know it is.
+            /// </summary>
+            public static IEnumerable<MethodBase> InstanceMethodsOf(Type owner, string label, params string[] except)
             {
+                var skip = except != null && except.Length > 0 ? new HashSet<string>(except) : null;
+
                 var targets = owner
                     .GetMethods(BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly)
-                    .Where(m => !m.IsAbstract)
+                    .Where(m => !m.IsAbstract && (skip == null || !skip.Contains(m.Name)))
                     .ToList();
 
-                helper.Log($"{label}: {targets.Count} instance methods targeted");
+                helper.Log($"{label}: {targets.Count} instance methods targeted"
+                           + (skip != null ? $" ({skip.Count} excluded by name)" : ""));
                 return targets.Cast<MethodBase>();
             }
 
@@ -8281,13 +10215,17 @@ namespace KaCMultiplayer
         /// building", a Building has no Player of its own, so the receiver alone is not the
         /// answer. Load the Building and map it: <c>ldarg_0</c> + <c>call GetPlayerByBuilding</c>
         /// leaves a Player exactly where the singleton would have been.
+        ///
+        /// EXCEPT IsPlayerBuilding, which is excluded: see <see cref="BuildingIsPlayerBuildingHook"/>
+        /// for why rewriting the Player.inst inside that one specific method turns its ownership
+        /// comparison into a tautology, and why it gets its own Prefix instead.
         /// </summary>
         [HarmonyPatch]
         public class BuildingPlayerReferencePatch
         {
             static IEnumerable<MethodBase> TargetMethods()
             {
-                return SingletonRewrite.InstanceMethodsOf(typeof(Building), "Building owner transpiler");
+                return SingletonRewrite.InstanceMethodsOf(typeof(Building), "Building owner transpiler", "IsPlayerBuilding");
             }
 
             static IEnumerable<CodeInstruction> Transpiler(MethodBase method, IEnumerable<CodeInstruction> instructions)

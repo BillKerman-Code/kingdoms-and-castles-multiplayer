@@ -39,6 +39,10 @@ namespace KaCMultiplayer
         // they must not block the lobby's ready/Start gating. Cleared if the real player reconnects.
         public bool isGhost = false;
 
+        // An AI kingdom's own parallel Player, built by BuildForAI rather than BuildRemotePlayer.
+        // See BuildForAI's own doc comment for why one exists at all.
+        public bool isAI = false;
+
         /// <summary>
         /// This player's Steam name, or their session name when Steam cannot tell us.
         ///
@@ -93,6 +97,53 @@ namespace KaCMultiplayer
         }
 
         /// <summary>
+        /// Builds the parallel <see cref="Player"/> for an AI kingdom, host-only.
+        ///
+        /// Reuses the exact same wiring a remote human's Player gets -- CopySharedSceneRefs,
+        /// EnableAllJobSlots, ResetAsIfSingleton, see those methods' own doc comments for what
+        /// each one fixes -- but points PlayerLandmassOwner at the <paramref name="existingOwner"/>
+        /// AIKingdom.SetupBase already created and registered via TakeOwnership, rather than
+        /// building a second, orphaned LandmassOwner for the same landmass/team the way
+        /// BuildRemotePlayer would. World.GetLandmassOwner(landmass) must keep resolving to the
+        /// ONE real LandmassOwner the AIKingdom component itself already owns; a duplicate here
+        /// would silently diverge from it (separate Gold, separate standings) with nothing else
+        /// in the game ever looking at it.
+        ///
+        /// Exists because AIKingdom.Update() and its Intention_* tick chain read and write
+        /// through the ambient Player.inst singleton -- AddVillager, SetJobPriorityOrder,
+        /// GetBuildingListForLandMass, TotalResidentialSlotsOnLandMass, confirmed via the shipped
+        /// IL, none of them take the AI's own identity as a parameter, they act on whichever
+        /// Player instance happens to be Player.inst when called. Run that tick with Player.inst
+        /// pointed at anything else and an AI kingdom's villagers and job-priority writes land on
+        /// THAT kingdom instead -- on the host, its own real kingdom, silently. This Player
+        /// exists so the host has something correct to swap Player.inst to for the duration of
+        /// that one tick (see AIKingdomOwnerHook), not as an optional nicety.
+        /// </summary>
+        public static SessionPlayer BuildForAI(ushort id, string name, LandmassOwner existingOwner)
+        {
+            GameObject host = new GameObject($"AI Kingdom ({name})");
+
+            Player player = host.AddComponent<Player>();
+            player.irrigation = host.AddComponent<IrrigationManager>();
+            player.PlayerLandmassOwner = existingOwner;
+
+            player.hazardPayWarmup = new Timer(5f);
+            player.hazardPayWarmup.Enabled = false;
+
+            CopySharedSceneRefs(player);
+            EnableAllJobSlots(player);
+            ResetAsIfSingleton(player);
+
+            var sp = new SessionPlayer(id, player);
+            sp.name = name;
+            sp.steamId = "AI-" + existingOwner.teamId;
+            sp.kingdomName = name;
+            sp.banner = existingOwner.bannerIdx;
+            sp.isAI = true;
+            return sp;
+        }
+
+        /// <summary>
         /// Creates the parallel <see cref="Player"/> that represents a remote participant,
         /// wired up with the components its kingdom logic expects to find.
         /// </summary>
@@ -132,7 +183,7 @@ namespace KaCMultiplayer
         ///
         /// A remote kingdom's Player is built here, in code, so every field Unity would normally
         /// have wired from the scene is null on it. Most of those never matter, because a remote
-        /// kingdom is simulated rather than driven. These six matter, because VANILLA reads them
+        /// kingdom is simulated rather than driven. These matter, because VANILLA reads them
         /// off whichever Player it happens to be looking at, and this mod regularly arranges for
         /// that to be a remote one.
         ///
@@ -150,6 +201,11 @@ namespace KaCMultiplayer
         ///                    that read from Player.inst to the building's OWNER. For another
         ///                    player's building the owner is one of these objects, so a null here
         ///                    is a building drawn with no material.
+        ///
+        ///   walkBounce,      Villager.UpdateAnim evaluates Player.inst.walkBounce for every
+        ///   showBounce       villager every frame. A null curve throws out of Player.Update each
+        ///                    frame and stops the whole kingdom, which is what a raid-year rotation
+        ///                    left stuck on a guest's stand-in did to the host.
         ///
         /// buildingContainer is deliberately NOT copied. Reset gives each kingdom its own, and
         /// sharing one would parent every kingdom's buildings under the local player's.
@@ -170,6 +226,8 @@ namespace KaCMultiplayer
                 if (source.MediumIntegrity != null) target.MediumIntegrity = source.MediumIntegrity;
                 if (source.LowIntegrity != null) target.LowIntegrity = source.LowIntegrity;
                 if (source.VeryLowIntegrity != null) target.VeryLowIntegrity = source.VeryLowIntegrity;
+                if (source.walkBounce != null) target.walkBounce = source.walkBounce;
+                if (source.showBounce != null) target.showBounce = source.showBounce;
             }
             catch (System.Exception ex) { Main.LogEx("copying shared scene references to a remote kingdom", ex); }
         }

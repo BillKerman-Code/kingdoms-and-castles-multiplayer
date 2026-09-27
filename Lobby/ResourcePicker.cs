@@ -35,6 +35,15 @@ namespace KaCMultiplayer.Lobby
 
         private static readonly List<Button> resourceButtons = new List<Button>();
         private static readonly List<Button> amountButtons = new List<Button>();
+
+        /// <summary>
+        /// Grid buttons that fell back to a flat rectangle because the real art could not be
+        /// cloned, so <see cref="Tint"/> knows which colour "unselected" means for THIS button:
+        /// a flat rectangle has no art of its own and needs cButton's fill to read as a button at
+        /// all, where a real clone already looks right with no tint.
+        /// </summary>
+        private static readonly HashSet<Button> fallbackButtons = new HashSet<Button>();
+
         private static TextMeshProUGUI summary;
 
         /// <summary>
@@ -53,6 +62,13 @@ namespace KaCMultiplayer.Lobby
         private static readonly Color cButton = new Color(0.16f, 0.22f, 0.30f, 1f);
         private static readonly Color cChosen = new Color(0.30f, 0.52f, 0.36f, 1f);
         private static readonly Color cText = new Color(0.88f, 0.92f, 0.96f, 1f);
+
+        // A grid cell cloned from the real button keeps that button's own art -- border, bevel,
+        // gradient -- and reads correctly with no tint at all, the same as the Demand/Offer/Cancel
+        // row right below it. cButton exists only for a cell that fell back to a flat rectangle,
+        // which has no art of its own to show through and needs an explicit fill to read as a
+        // button at all.
+        private static readonly Color cUnselectedReal = Color.white;
 
         public static bool IsOpen { get { return root != null && root.activeSelf; } }
 
@@ -112,6 +128,8 @@ namespace KaCMultiplayer.Lobby
             secondaryLabel = null;
             resourceButtons.Clear();
             amountButtons.Clear();
+            fallbackButtons.Clear();
+            restingColour.Clear();
         }
 
         /// <summary>
@@ -162,9 +180,23 @@ namespace KaCMultiplayer.Lobby
 
             root = Panel("ResourcePicker", parent, 560f, 430f);
 
+            // A donor built once, harvested for both its background art and its button's real art
+            // (see KacModalStyle), then discarded. The grid below keeps its own plain style: it
+            // is a custom resource-type toggle, not a panel this prefab was ever meant to hold,
+            // and it is the one part of this screen that has already caused a real, shipped bug
+            // (a Demand button once cloned inactive). Everything AROUND the grid -- the panel it
+            // sits in, and the buttons a player actually commits with -- is worth the real art.
+            KacModalStyle.Panel donor = KacModalStyle.Build(parent);
+            ApplyRealBackground(donor);
+
             titleLabel = Label(root.transform, "Demand from another kingdom", 20f, FontStyles.Bold, 0f, 180f, 520f, 34f);
 
-            // Resources, four to a row.
+            // Resources, four to a row. Plain rectangles, not cloned from the donor's real button:
+            // an earlier attempt at cloning it for every grid cell (18 clones from one donor
+            // button, in a screen already cloning it three more times for the commit row) broke
+            // the panel's layout badly enough that buttons rendered entirely outside it. That is
+            // reverted here rather than chased further blind -- this grid's own style, unchanged
+            // since before that attempt, is the confirmed-working one.
             resourceButtons.Clear();
             FreeResourceType[] types = PlayerRelations.Demandable;
             const float bw = 124f, bh = 34f, gapX = 6f, gapY = 6f;
@@ -178,6 +210,7 @@ namespace KaCMultiplayer.Lobby
                 FreeResourceType t = types[i];
                 Button b = MakeButton(root.transform, PlayerRelations.ResourceLabel(t), x, y, bw, bh,
                                       delegate { chosen = t; Refresh(); });
+                fallbackButtons.Add(b);
                 resourceButtons.Add(b);
             }
 
@@ -191,23 +224,19 @@ namespace KaCMultiplayer.Lobby
                 int amount = Amounts[i];
                 Button b = MakeButton(root.transform, amount.ToString(), x, -56f, aw, ah,
                                       delegate { chosenAmount = amount; Refresh(); });
+                fallbackButtons.Add(b);
                 amountButtons.Add(b);
             }
 
             summary = Label(root.transform, "", 17f, FontStyles.Normal, 0f, -104f, 520f, 30f);
 
-            // A donor built once and harvested three times, purely for its button's real art (see
-            // KacModalStyle). The grid above stays the plain style it has always been: it is a
-            // custom resource-type toggle, not a plain action, so there is no real button in the
-            // bundle it could honestly borrow from, and it is the one part of this screen that has
-            // already caused a real, shipped bug (a Demand button once cloned inactive). The three
-            // buttons a player actually commits with are worth the real art; the grid is left
-            // alone rather than risked for a cosmetic match.
-            KacModalStyle.Panel donor = KacModalStyle.Build(root.transform);
-
             // Both handlers read aidMode when they are CLICKED rather than when they are built,
             // so the same two buttons serve a demand and a gift and simply swap which is which.
-            Button primary = ActionButton(donor, "Demand it", -110f, -160f, delegate
+            // Not positioned yet: a real cloned button carries whatever height the artist gave
+            // it, which the first version of this screen did not account for, and its bottom edge
+            // ended up outside the panel. LayoutActionButtons below places all three from their
+            // own MEASURED heights once they all exist, real or fallback alike.
+            Button primary = ActionButton(donor, "Demand it", delegate
             {
                 PlayerRelations.Send(localTeam, targetTeam,
                     aidMode ? Net.Messages.DealKind.Offer : Net.Messages.DealKind.Demand,
@@ -216,7 +245,7 @@ namespace KaCMultiplayer.Lobby
             });
             primaryLabel = primary == null ? null : primary.GetComponentInChildren<TextMeshProUGUI>();
 
-            Button secondary = ActionButton(donor, "Offer it instead", 110f, -160f, delegate
+            Button secondary = ActionButton(donor, "Offer it instead", delegate
             {
                 PlayerRelations.Send(localTeam, targetTeam,
                     aidMode ? Net.Messages.DealKind.Demand : Net.Messages.DealKind.Offer,
@@ -225,20 +254,70 @@ namespace KaCMultiplayer.Lobby
             });
             secondaryLabel = secondary == null ? null : secondary.GetComponentInChildren<TextMeshProUGUI>();
 
-            ActionButton(donor, "Cancel", 0f, -205f, delegate { Close(); });
+            Button cancel = ActionButton(donor, "Cancel", delegate { Close(); });
+
+            LayoutActionButtons(primary, secondary, cancel);
 
             // The donor's own panel, backdrop, title and description are of no further use once
-            // its button has been cloned three times; the clones were reparented onto this screen
-            // as each was made, so destroying it here takes nothing they depend on with it.
+            // its background has been copied and its button cloned three times; the clones were
+            // reparented onto this screen as each was made, so destroying it here takes nothing
+            // they depend on with it.
             if (donor != null) UnityEngine.Object.Destroy(donor.Root);
+
+            // The game's own Hall of Diplomacy art over all of it, the same as the diplomacy
+            // window. Each button's resting colour is remembered afterwards so the selection
+            // highlight can be put back to exactly what the game drew.
+            KacGameArt.SkinPanel(root);
+            restingColour.Clear();
+            foreach (Button b in root.GetComponentsInChildren<Button>(true))
+            {
+                Image img = b.GetComponent<Image>();
+                if (img != null) restingColour[b] = img.color;
+            }
+        }
+
+        private static readonly System.Collections.Generic.Dictionary<Button, Color> restingColour =
+            new System.Collections.Generic.Dictionary<Button, Color>();
+
+        /// <summary>A warm highlight for the chosen resource and amount, readable on the game's art.</summary>
+        private static readonly Color cChosenSkinned = new Color(1f, 0.82f, 0.38f, 1f);
+
+        /// <summary>
+        /// Paints the real modal's background onto THIS panel's own Image, rather than reusing
+        /// the donor's Container directly the way AllianceRequestWindow and DealRequestWindow do.
+        /// Doing it that way here would put the donor's own Title and Description at whatever
+        /// fixed positions the artist gave them, colliding with the resource grid this screen
+        /// actually needs. This borrows just the art -- sprite, slicing and colour -- onto a
+        /// panel this screen still fully owns the size and children of.
+        /// </summary>
+        private static void ApplyRealBackground(KacModalStyle.Panel donor)
+        {
+            if (donor == null || root == null) return;
+
+            Sprite sprite; Image.Type type; Color colour;
+            if (!KacModalStyle.TryGetBackground(donor, out sprite, out type, out colour)) return;
+
+            Image img = root.GetComponent<Image>();
+            if (img == null) return;
+
+            img.sprite = sprite;
+            img.type = type;
+            img.color = colour;
+
+            // The flat fallback drew its own border with a plain Outline effect; the real sprite
+            // is expected to carry its border baked into the art, and layering a second,
+            // flat-coloured one on top of real border art would look wrong rather than better.
+            Outline outline = root.GetComponent<Outline>();
+            if (outline != null) UnityEngine.Object.Destroy(outline);
         }
 
         /// <summary>
         /// One of the three commit buttons (Demand it / Offer it instead / Cancel). Clones its
         /// art from <paramref name="donor"/> when one was built; falls back to the plain flat
-        /// button, unchanged from before that art existed, if it was not.
+        /// button, unchanged from before that art existed, if it was not. Left unpositioned
+        /// either way; see <see cref="LayoutActionButtons"/>.
         /// </summary>
-        private static Button ActionButton(KacModalStyle.Panel donor, string caption, float x, float y,
+        private static Button ActionButton(KacModalStyle.Panel donor, string caption,
                                            UnityEngine.Events.UnityAction onClick)
         {
             if (donor != null)
@@ -246,16 +325,73 @@ namespace KaCMultiplayer.Lobby
                 Button real = KacModalStyle.CloneButton(donor, caption, root.transform);
                 if (real != null)
                 {
-                    RectTransform rt = real.GetComponent<RectTransform>();
-                    if (rt != null) rt.anchoredPosition = new Vector2(x, y);
-
                     KacModalStyle.SetLabel(real, caption);
                     KacModalStyle.SetClick(real, onClick);
                     return real;
                 }
             }
 
-            return MakeButton(root.transform, caption, x, y, 190f, 40f, onClick);
+            return MakeButton(root.transform, caption, 0f, 0f, 190f, 40f, onClick);
+        }
+
+        /// <summary>
+        /// Places the three commit buttons below the summary line and grows the panel to actually
+        /// contain them, using each button's own MEASURED height rather than the size the old
+        /// flat rectangles happened to be. That old, guessed size is exactly what put a real,
+        /// taller button's bottom edge outside its own panel: this is that fix.
+        ///
+        /// The panel grows from its centre, since every one of its children (including these
+        /// three) is positioned relative to that centre. So it grows equally in both directions;
+        /// the trade-off is a little empty room above the title if the real buttons turn out to
+        /// be a lot taller than the old guess, rather than any child moving from where it already
+        /// is, correctly, today.
+        /// </summary>
+        private static void LayoutActionButtons(Button primary, Button secondary, Button cancel)
+        {
+            const float fallbackHeight = 40f;
+            const float gapAboveRow = 22f;
+            const float gapBetweenRows = 14f;
+            const float bottomMargin = 26f;
+
+            // Where the summary label (y=-104, 30 tall) actually ends; the anchor everything
+            // below is measured from, so the row can never overlap it no matter how tall the
+            // real buttons are.
+            const float summaryBottom = -104f - 15f;
+
+            float rowHeight = Mathf.Max(KacModalStyle.Height(primary, fallbackHeight),
+                                        KacModalStyle.Height(secondary, fallbackHeight));
+            float cancelHeight = KacModalStyle.Height(cancel, fallbackHeight);
+
+            float rowCenterY = summaryBottom - gapAboveRow - rowHeight / 2f;
+            float rowBottom = rowCenterY - rowHeight / 2f;
+
+            float cancelCenterY = rowBottom - gapBetweenRows - cancelHeight / 2f;
+            float cancelBottom = cancelCenterY - cancelHeight / 2f;
+
+            SetPosition(primary, -110f, rowCenterY);
+            SetPosition(secondary, 110f, rowCenterY);
+            SetPosition(cancel, 0f, cancelCenterY);
+
+            float neededHalfHeight = -cancelBottom + bottomMargin;
+            RectTransform panelRect = root == null ? null : root.GetComponent<RectTransform>();
+            if (panelRect != null && neededHalfHeight * 2f > panelRect.sizeDelta.y)
+                panelRect.sizeDelta = new Vector2(panelRect.sizeDelta.x, neededHalfHeight * 2f);
+        }
+
+        /// <summary>
+        /// Positions a button relative to the panel's CENTRE. Anchors are reset first: a button
+        /// cloned from the real dialog keeps that dialog's anchoring, which is its bottom edge, so
+        /// the centre-relative offsets below used to put the whole commit row a panel's height
+        /// under the panel, off the bottom of the window.
+        /// </summary>
+        private static void SetPosition(Button b, float x, float y)
+        {
+            if (b == null) return;
+            RectTransform rt = b.GetComponent<RectTransform>();
+            if (rt == null) return;
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(x, y);
         }
 
         /// <summary>Repaints the selection highlight and the sentence under it.</summary>
@@ -264,7 +400,10 @@ namespace KaCMultiplayer.Lobby
             // Retitled per opening, because the same grid means two opposite things and the only
             // thing telling them apart is the wording.
             if (titleLabel != null)
-                titleLabel.text = aidMode ? "Send aid to another kingdom" : "Demand from another kingdom";
+            {
+                string who = Main.KingdomNameForTeam(targetTeam);
+                titleLabel.text = aidMode ? ("Send aid to " + who) : ("Demand from " + who);
+            }
             if (primaryLabel != null) primaryLabel.text = aidMode ? "Send it" : "Demand it";
             if (secondaryLabel != null) secondaryLabel.text = aidMode ? "Demand it instead" : "Offer it instead";
 
@@ -282,10 +421,18 @@ namespace KaCMultiplayer.Lobby
                 string what = chosenAmount + " " + PlayerRelations.ResourceLabel(chosen);
                 bool atWar = PlayerRelations.Get(localTeam, targetTeam) == World.Relations.Enemy
                           || PlayerRelations.WarCountdown(localTeam, targetTeam) > 0;
+                bool ai = AiDiplomacy.IsAiTeam(targetTeam);
 
-                summary.text = atWar
-                    ? ("Ask for " + what + " to end the war. They may accept or refuse.")
-                    : ("Ask for " + what + ". They may accept or refuse.");
+                if (aidMode)
+                    summary.text = ai
+                        ? ("Send " + what + " as a gift. Gifts raise their opinion of you.")
+                        : ("Send " + what + " as a gift.");
+                else if (ai)
+                    summary.text = "Demand " + what + ". They pay only if they like you, or fear your armies.";
+                else
+                    summary.text = atWar
+                        ? ("Ask for " + what + " to end the war. They may accept or refuse.")
+                        : ("Ask for " + what + ". They may accept or refuse.");
             }
         }
 
@@ -293,7 +440,17 @@ namespace KaCMultiplayer.Lobby
         {
             if (b == null) return;
             Image img = b.GetComponent<Image>();
-            if (img != null) img.color = selected ? cChosen : cButton;
+            if (img == null) return;
+
+            Color resting;
+            if (restingColour.TryGetValue(b, out resting) && KacGameArt.Skinned)
+            {
+                img.color = selected ? cChosenSkinned : resting;
+                return;
+            }
+
+            Color unselected = fallbackButtons.Contains(b) ? cButton : cUnselectedReal;
+            img.color = selected ? cChosen : unselected;
         }
 
         // ---- small UI builders ----------------------------------------------------------

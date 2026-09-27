@@ -91,6 +91,34 @@ namespace KaCMultiplayer.Net
 
         public bool FogOfWar { get; set; }
 
+        /// <summary>Most AI kingdoms a session can hold: the game's own AI team range is 2-4.</summary>
+        public const int MaxAiKingdoms = 3;
+
+        /// <summary>How many AI kingdoms to place, 0-3. Defaults to 0 so a session nobody touched
+        /// the control in behaves exactly as it always has: no AI kingdoms.</summary>
+        public int AiKingdomCount { get; set; }
+
+        /// <summary>Per AI slot: index into AIKingdom.SkillLevel (0 Low .. 3 VeryHigh). Mutated
+        /// in place, never replaced, for the same reason this whole object is.</summary>
+        public readonly int[] AiDifficulties = new int[MaxAiKingdoms];
+
+        /// <summary>
+        /// Per AI slot: the rival code vanilla's own rival screen would pick
+        /// (RivalKingdomSettingsUI.FindUnusedRivalCode). One number chooses both the kingdom's
+        /// name (AIBrainsContainer.AIKingdomNamePool[code]) and its banner
+        /// (World.liverySets[code]), and becomes AIStartData.bioCode. Chosen by the host and
+        /// sent with everything else, so every machine names and colours each AI the same.
+        /// -1 until the host has picked one.
+        /// </summary>
+        public readonly int[] AiCodes = new int[MaxAiKingdoms];
+
+        /// <summary>Per AI slot: a name the host typed for that kingdom, or empty to use the
+        /// game's own name for its rival code (AIKingdomNamePool[code]).</summary>
+        public readonly string[] AiNames = new string[MaxAiKingdoms];
+
+        /// <summary>Longest AI kingdom name the lobby accepts.</summary>
+        public const int MaxAiNameLength = 24;
+
         public LobbySettings()
         {
             // Same defaults the packet class had. A single space for the password rather
@@ -99,6 +127,13 @@ namespace KaCMultiplayer.Net
             Password = " ";
             WorldRivers = World.MapRiverLakes.Some;
             FogOfWar = true;
+            AiKingdomCount = 0;
+            for (int i = 0; i < MaxAiKingdoms; i++)
+            {
+                AiDifficulties[i] = 1;   // Medium
+                AiCodes[i] = -1;
+                AiNames[i] = "";
+            }
         }
 
         /// <summary>
@@ -133,6 +168,10 @@ namespace KaCMultiplayer.Net
             WorldRivers = other.WorldRivers;
             PlacementType = other.PlacementType;
             FogOfWar = other.FogOfWar;
+            AiKingdomCount = other.AiKingdomCount;
+            System.Array.Copy(other.AiDifficulties, AiDifficulties, MaxAiKingdoms);
+            System.Array.Copy(other.AiCodes, AiCodes, MaxAiKingdoms);
+            System.Array.Copy(other.AiNames, AiNames, MaxAiKingdoms);
         }
 
         /// <summary>

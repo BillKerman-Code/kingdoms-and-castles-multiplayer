@@ -99,7 +99,8 @@ namespace KaCMultiplayer.Combat
                 for (int i = 0; i < armies.Count; i++)   // .Count, never .data.Length
                 {
                     UnitSystem.Army army = armies.data[i];
-                    if (army == null || army.teamId != localTeam) continue;   // only ours to announce
+                    if (army == null || (army.teamId != localTeam
+                        && !(NetRouter.IsServer && army.teamId == 1))) continue;
 
                     Vector3 now = army.generalPos;
 

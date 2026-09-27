@@ -25,6 +25,13 @@ namespace KaCMultiplayer.Net.Messages
         public int WorldRivers;
         public int PlacementType;
         public bool FogOfWar;
+        public int AiKingdomCount;
+
+        // Always exactly LobbySettings.MaxAiKingdoms entries on the wire, used or not, so the
+        // number of ints a receiver reads never depends on a value it has not read yet.
+        public int[] AiDifficulties = new int[LobbySettings.MaxAiKingdoms];
+        public int[] AiCodes = new int[LobbySettings.MaxAiKingdoms];
+        public string[] AiNames = new string[LobbySettings.MaxAiKingdoms];
 
         public void Serialize(Message m)
         {
@@ -39,6 +46,13 @@ namespace KaCMultiplayer.Net.Messages
             m.AddInt(WorldRivers);
             m.AddInt(PlacementType);
             m.AddBool(FogOfWar);
+            m.AddInt(AiKingdomCount);
+            for (int i = 0; i < LobbySettings.MaxAiKingdoms; i++)
+            {
+                m.AddInt(AiDifficulties[i]);
+                m.AddInt(AiCodes[i]);
+                m.AddString(AiNames[i] ?? string.Empty);
+            }
         }
 
         public void Deserialize(Message m)
@@ -54,6 +68,13 @@ namespace KaCMultiplayer.Net.Messages
             WorldRivers = m.GetInt();
             PlacementType = m.GetInt();
             FogOfWar = m.GetBool();
+            AiKingdomCount = m.GetInt();
+            for (int i = 0; i < LobbySettings.MaxAiKingdoms; i++)
+            {
+                AiDifficulties[i] = m.GetInt();
+                AiCodes[i] = m.GetInt();
+                AiNames[i] = m.GetString();
+            }
         }
 
         /// <summary>
@@ -62,7 +83,7 @@ namespace KaCMultiplayer.Net.Messages
         /// </summary>
         public static LobbySettingsMessage From(LobbySettings s)
         {
-            return new LobbySettingsMessage
+            var msg = new LobbySettingsMessage
             {
                 ServerName = s.ServerName,
                 MaxPlayers = s.MaxPlayers,
@@ -74,8 +95,13 @@ namespace KaCMultiplayer.Net.Messages
                 WorldType = (int)s.WorldType,
                 WorldRivers = (int)s.WorldRivers,
                 PlacementType = s.PlacementType,
-                FogOfWar = s.FogOfWar
+                FogOfWar = s.FogOfWar,
+                AiKingdomCount = s.AiKingdomCount
             };
+            System.Array.Copy(s.AiDifficulties, msg.AiDifficulties, LobbySettings.MaxAiKingdoms);
+            System.Array.Copy(s.AiCodes, msg.AiCodes, LobbySettings.MaxAiKingdoms);
+            System.Array.Copy(s.AiNames, msg.AiNames, LobbySettings.MaxAiKingdoms);
+            return msg;
         }
 
         /// <summary>Copies received values into the live settings object.</summary>
@@ -92,6 +118,10 @@ namespace KaCMultiplayer.Net.Messages
             s.WorldRivers = (World.MapRiverLakes)WorldRivers;
             s.PlacementType = PlacementType;
             s.FogOfWar = FogOfWar;
+            s.AiKingdomCount = AiKingdomCount;
+            System.Array.Copy(AiDifficulties, s.AiDifficulties, LobbySettings.MaxAiKingdoms);
+            System.Array.Copy(AiCodes, s.AiCodes, LobbySettings.MaxAiKingdoms);
+            System.Array.Copy(AiNames, s.AiNames, LobbySettings.MaxAiKingdoms);
         }
     }
 }

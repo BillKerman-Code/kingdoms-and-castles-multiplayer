@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using KaCMultiplayer.Lobby;
 using KaCMultiplayer.Net;
 using TMPro;
 using UnityEngine;
@@ -12,9 +13,15 @@ namespace KaCMultiplayer.Trade
     /// "What my kingdom charges." One row per commodity, a price you can raise, lower, or refuse.
     ///
     /// Hand-built rather than taken from the prefab bundle, for the reason the other mod windows
-    /// are: nothing in the bundle is this shape, and ten rows of three buttons is less code than
-    /// authoring a panel would be. Its own overlay canvas, because MenuUi.Root is the main-menu UI
-    /// and is not active while a game is running.
+    /// are: nothing in the bundle is this shape. Its own overlay canvas, because MenuUi.Root is the
+    /// main-menu UI and is not active while a game is running.
+    ///
+    /// DRESSED IN THE GAME'S OWN ART, the same as the Ctrl+Shift+D diplomacy window it sits next
+    /// to: the Hall of Diplomacy's panel, fonts and buttons (KacGameArt.SkinPanel), each good on
+    /// the game's own row art (KacGameArt.SkinRow), and the game's resource icons beside names and
+    /// prices. It used to be flat navy rectangles, which read as a debug panel rather than part of
+    /// Kingdoms and Castles. Every piece of borrowed art is optional: whatever cannot be found is
+    /// left in the plain style below, so the window always works.
     ///
     /// GOLD IS NOT LISTED. It is what everything else is priced IN, so a price for gold in gold is
     /// not a thing a player can mean, and offering the row would only invite the question.
@@ -27,19 +34,39 @@ namespace KaCMultiplayer.Trade
     {
         private const int SortingOrder = 5200;
 
+        private const float PanelWidth = 700f;
+        private const float RowWidth = 640f;
+        private const float RowHeight = 44f;
+        private const float RowGap = 6f;
+
         private static GameObject canvasObj;
         private static GameObject root;
         private static int localTeam;
+        private static TextMeshProUGUI titleLabel;
 
-        private static readonly List<FreeResourceType> rows = new List<FreeResourceType>();
-        private static readonly List<TextMeshProUGUI> priceLabels = new List<TextMeshProUGUI>();
+        /// <summary>One good's row, and the parts of it that change.</summary>
+        private class Row
+        {
+            public FreeResourceType Type;
+            public GameObject Obj;
+            public TextMeshProUGUI Price;
+            public TextMeshProUGUI HoldCaption;
+            public Button Hold;
+            public readonly List<Button> Steps = new List<Button>();
+        }
 
+        private static readonly List<Row> rows = new List<Row>();
+
+        // The plain style, used for anything the game's art could not replace.
         private static readonly Color cPanel = new Color(0.10f, 0.14f, 0.20f, 0.97f);
         private static readonly Color cBorder = new Color(0.27f, 0.35f, 0.46f, 1f);
+        private static readonly Color cRow = new Color(0.14f, 0.19f, 0.26f, 1f);
         private static readonly Color cButton = new Color(0.16f, 0.22f, 0.30f, 1f);
         private static readonly Color cRefuse = new Color(0.42f, 0.19f, 0.19f, 1f);
         private static readonly Color cText = new Color(0.88f, 0.92f, 0.96f, 1f);
-        private static readonly Color cMuted = new Color(0.62f, 0.68f, 0.75f, 1f);
+
+        /// <summary>"Not for sale" in the colour the diplomacy window uses for war.</summary>
+        private static readonly Color cHeld = new Color(0.90f, 0.42f, 0.38f);
 
         public static bool IsOpen { get { return root != null && root.activeSelf; } }
 
@@ -68,14 +95,17 @@ namespace KaCMultiplayer.Trade
 
             // Escape closes, and nothing else here reads the keyboard: the prices are set with the
             // mouse so a stray keypress cannot change what a kingdom charges.
-            if (Input.GetKeyDown(KeyCode.Escape)) Close();
+            if (Input.GetKeyDown(KeyCode.Escape)) { Close(); return; }
+
+            // A session can end while the window is up.
+            if (!NetClient.client.IsConnected) Close();
         }
 
         public static void Reset()
         {
             rows.Clear();
-            priceLabels.Clear();
             root = null;
+            titleLabel = null;
 
             if (canvasObj != null)
             {
@@ -88,8 +118,14 @@ namespace KaCMultiplayer.Trade
 
         private static void Step(FreeResourceType type, int delta)
         {
+            // Held goods have no price to move; Sell puts them back on the market first. Without
+            // this, "-" on a held good quietly offered it for 1 gold.
+            if (!ExportPrices.ForSale(localTeam, type)) return;
+
+            // Never down to zero by stepping: zero means "not for sale", and that is what Hold is
+            // for. A price walked down one click too far used to take the goods off the market.
             int now = ExportPrices.PriceFor(localTeam, type);
-            ExportPrices.SetLocal(localTeam, type, now + delta);
+            ExportPrices.SetLocal(localTeam, type, Mathf.Max(1, now + delta));
             Refresh();
         }
 
@@ -105,21 +141,47 @@ namespace KaCMultiplayer.Trade
 
         private static void Refresh()
         {
-            for (int i = 0; i < rows.Count && i < priceLabels.Count; i++)
+            if (titleLabel != null)
             {
-                FreeResourceType type = rows[i];
-                TextMeshProUGUI label = priceLabels[i];
-                if (label == null) continue;
+                string kingdom = Main.KingdomNameForTeam(localTeam);
+                titleLabel.text = string.IsNullOrEmpty(kingdom) ? "Export Prices" : kingdom + " - Export Prices";
+            }
 
-                if (!ExportPrices.ForSale(localTeam, type))
+            string gold = KacGameArt.ResourceIcon(FreeResourceType.Gold);
+
+            for (int i = 0; i < rows.Count; i++)
+            {
+                Row row = rows[i];
+                bool selling = ExportPrices.ForSale(localTeam, row.Type);
+
+                if (row.Price != null)
                 {
-                    label.text = "not for sale";
-                    label.color = cMuted;
+                    if (selling)
+                    {
+                        int price = ExportPrices.PriceFor(localTeam, row.Type);
+                        row.Price.text = gold.Length > 0 ? price + " " + gold : price + "g";
+                        row.Price.color = KacGameArt.BodyText(cText);
+                    }
+                    else
+                    {
+                        row.Price.text = "Not for sale";
+                        row.Price.color = KacGameArt.Relation(cHeld);
+                    }
                 }
-                else
+
+                // The price buttons only mean something while the goods are on offer, and greying
+                // them out says so better than letting a click do nothing.
+                for (int s = 0; s < row.Steps.Count; s++)
+                    if (row.Steps[s] != null) row.Steps[s].interactable = selling;
+
+                if (row.HoldCaption != null) row.HoldCaption.text = selling ? "Hold" : "Sell";
+
+                // Only the plain style shows Hold in red; the game's own button art stays as the
+                // game draws it, and the price line above already says the goods are held.
+                if (row.Hold != null && !KacGameArt.Skinned)
                 {
-                    label.text = ExportPrices.PriceFor(localTeam, type) + "g";
-                    label.color = cText;
+                    Image img = row.Hold.GetComponent<Image>();
+                    if (img != null) img.color = selling ? cRefuse : cButton;
                 }
             }
         }
@@ -161,50 +223,38 @@ namespace KaCMultiplayer.Trade
                 Transform parent = EnsureCanvas();
 
                 rows.Clear();
-                priceLabels.Clear();
 
                 // Everything tradeable except gold, which is the unit of account.
+                List<FreeResourceType> goods = new List<FreeResourceType>();
                 FreeResourceType[] all = PlayerRelations.Demandable;
                 for (int i = 0; i < all.Length; i++)
-                    if (all[i] != FreeResourceType.Gold) rows.Add(all[i]);
+                    if (all[i] != FreeResourceType.Gold) goods.Add(all[i]);
 
-                const float rowHeight = 42f;
-                float panelHeight = 150f + rows.Count * rowHeight;
+                float listHeight = goods.Count * (RowHeight + RowGap) - RowGap;
+                float panelHeight = 118f + listHeight + 84f;
+                float halfHeight = panelHeight / 2f;
 
-                root = Panel("ExportPrices", parent, 620f, panelHeight);
+                root = Panel("ExportPrices", parent, PanelWidth, panelHeight);
 
-                string kingdom = Main.KingdomNameForTeam(localTeam);
-                Label(root.transform, string.IsNullOrEmpty(kingdom) ? "Export Prices" : kingdom + " - Export Prices",
-                      22f, FontStyles.Bold, 0f, panelHeight / 2f - 34f, 560f, 34f);
+                // The biggest text on the panel, which is how SkinPanel knows to give it the
+                // game's title font. Set properly in Refresh, where the kingdom name is current.
+                titleLabel = Label(root.transform, "Export Prices", 26f, FontStyles.Bold,
+                                   0f, halfHeight - 40f, PanelWidth - 60f, 38f);
 
-                Label(root.transform, "What other kingdoms pay for goods your merchants carry to them.",
-                      15f, FontStyles.Normal, 0f, panelHeight / 2f - 64f, 560f, 24f)
-                    .color = cMuted;
+                Label(root.transform, "What other kingdoms pay for each unit your merchants carry to them.",
+                      16f, FontStyles.Normal, 0f, halfHeight - 76f, PanelWidth - 60f, 26f);
 
-                float top = panelHeight / 2f - 96f;
+                float firstRowY = halfHeight - 118f - RowHeight / 2f;
+                for (int i = 0; i < goods.Count; i++)
+                    rows.Add(BuildRow(goods[i], firstRowY - i * (RowHeight + RowGap)));
+
+                MakeButton(root.transform, "Close", 0f, -halfHeight + 40f, 180f, 40f, Close);
+
+                // The game's own Hall of Diplomacy art, exactly as the diplomacy window wears it:
+                // the panel, its buttons and its text first, then each row's own background.
+                KacGameArt.SkinPanel(root);
                 for (int i = 0; i < rows.Count; i++)
-                {
-                    FreeResourceType type = rows[i];
-                    float y = top - i * rowHeight;
-
-                    Label(root.transform, PlayerRelations.ResourceLabel(type), 17f, FontStyles.Normal,
-                          -220f, y, 180f, 30f).alignment = TextAlignmentOptions.Left;
-
-                    // Captured per row, which is the whole reason these are locals: a loop variable
-                    // shared by every handler would leave all ten buttons editing the last resource.
-                    FreeResourceType captured = type;
-
-                    MakeButton(root.transform, "-", -60f, y, 34f, 30f, cButton, delegate { Step(captured, -1); });
-                    priceLabels.Add(Label(root.transform, "", 17f, FontStyles.Bold, 10f, y, 110f, 30f));
-                    MakeButton(root.transform, "+", 80f, y, 34f, 30f, cButton, delegate { Step(captured, 1); });
-
-                    MakeButton(root.transform, "-10", 128f, y, 44f, 30f, cButton, delegate { Step(captured, -10); });
-                    MakeButton(root.transform, "+10", 178f, y, 44f, 30f, cButton, delegate { Step(captured, 10); });
-
-                    MakeButton(root.transform, "Hold", 240f, y, 60f, 30f, cRefuse, delegate { Withhold(captured); });
-                }
-
-                MakeButton(root.transform, "Close", 0f, -panelHeight / 2f + 32f, 160f, 36f, cButton, Close);
+                    KacGameArt.SkinRow(rows[i].Obj);
 
                 root.SetActive(false);
             }
@@ -215,26 +265,85 @@ namespace KaCMultiplayer.Trade
             }
         }
 
+        /// <summary>
+        /// One good: its icon and name, then  -10  -  price  +  +10, then Hold.
+        /// </summary>
+        private static Row BuildRow(FreeResourceType type, float y)
+        {
+            GameObject obj = new GameObject("Row " + type, typeof(RectTransform), typeof(Image));
+            Row row = new Row { Type = type, Obj = obj };
+
+            RectTransform rt = obj.GetComponent<RectTransform>();
+            rt.SetParent(root.transform, false);
+            rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
+            rt.sizeDelta = new Vector2(RowWidth, RowHeight);
+            rt.anchoredPosition = new Vector2(0f, y);
+            obj.GetComponent<Image>().color = cRow;
+
+            Transform t = obj.transform;
+
+            // The game's own icon, where it can be drawn. Rich text is on for these two labels only,
+            // and safely: what they show is fixed text and a number, never anything a player typed.
+            string icon = KacGameArt.ResourceIcon(type);
+            string caption = icon.Length > 0 ? icon + " " + PlayerRelations.ResourceLabel(type)
+                                             : PlayerRelations.ResourceLabel(type);
+            TextMeshProUGUI name = Label(t, caption, 18f, FontStyles.Normal, -212f, 0f, 190f, RowHeight - 6f);
+            name.alignment = TextAlignmentOptions.Left;
+            UseIcons(name);
+
+            // Captured per row, which is the whole reason these are locals: a loop variable shared
+            // by every handler would leave all ten rows editing the last resource.
+            FreeResourceType captured = type;
+
+            row.Steps.Add(MakeButton(t, "-10", -78f, 0f, 52f, 32f, delegate { Step(captured, -10); }));
+            row.Steps.Add(MakeButton(t, "-", -30f, 0f, 38f, 32f, delegate { Step(captured, -1); }));
+
+            row.Price = Label(t, "", 18f, FontStyles.Bold, 40f, 0f, 96f, RowHeight - 6f);
+            UseIcons(row.Price);
+
+            // "Not for sale" is wider than any price; shrink it to fit between the buttons rather
+            // than let it run under them.
+            row.Price.fontSizeMax = 18f;
+            row.Price.fontSizeMin = 11f;
+            row.Price.enableAutoSizing = true;
+
+            row.Steps.Add(MakeButton(t, "+", 110f, 0f, 38f, 32f, delegate { Step(captured, 1); }));
+            row.Steps.Add(MakeButton(t, "+10", 158f, 0f, 52f, 32f, delegate { Step(captured, 10); }));
+
+            row.Hold = MakeButton(t, "Hold", 262f, 0f, 92f, 32f, delegate { Withhold(captured); });
+            row.HoldCaption = row.Hold.GetComponentInChildren<TextMeshProUGUI>();
+
+            return row;
+        }
+
+        /// <summary>Lets a label draw the game's resource icons.</summary>
+        private static void UseIcons(TextMeshProUGUI label)
+        {
+            TMP_SpriteAsset icons = KacGameArt.IconSprites;
+            if (icons == null) return;
+
+            label.richText = true;
+            label.spriteAsset = icons;
+        }
+
         private static GameObject Panel(string name, Transform parent, float w, float h)
         {
-            GameObject border = new GameObject(name, typeof(RectTransform), typeof(Image));
-            RectTransform rt = border.GetComponent<RectTransform>();
+            // One Image, so the game's panel art (KacGameArt.SkinPanel) can replace it outright.
+            // The outline is the plain style's border, and SkinPanel removes it along with the flat
+            // fill, because the game's art carries its own.
+            GameObject go = new GameObject(name, typeof(RectTransform), typeof(Image));
+            RectTransform rt = go.GetComponent<RectTransform>();
             rt.SetParent(parent, false);
             rt.anchorMin = rt.anchorMax = new Vector2(0.5f, 0.5f);
-            rt.sizeDelta = new Vector2(w + 4f, h + 4f);
+            rt.sizeDelta = new Vector2(w, h);
             rt.anchoredPosition = Vector2.zero;
-            border.GetComponent<Image>().color = cBorder;
+            go.GetComponent<Image>().color = cPanel;
 
-            GameObject inner = new GameObject("Panel", typeof(RectTransform), typeof(Image));
-            RectTransform irt = inner.GetComponent<RectTransform>();
-            irt.SetParent(border.transform, false);
-            irt.anchorMin = Vector2.zero;
-            irt.anchorMax = Vector2.one;
-            irt.offsetMin = new Vector2(2f, 2f);
-            irt.offsetMax = new Vector2(-2f, -2f);
-            inner.GetComponent<Image>().color = cPanel;
+            Outline outline = go.AddComponent<Outline>();
+            outline.effectColor = cBorder;
+            outline.effectDistance = new Vector2(2f, -2f);
 
-            return border;
+            return go;
         }
 
         private static TextMeshProUGUI Label(Transform parent, string text, float size,
@@ -270,7 +379,7 @@ namespace KaCMultiplayer.Trade
         }
 
         private static Button MakeButton(Transform parent, string text, float x, float y,
-                                         float w, float h, Color colour, UnityEngine.Events.UnityAction onClick)
+                                         float w, float h, UnityEngine.Events.UnityAction onClick)
         {
             GameObject obj = new GameObject("Button", typeof(RectTransform), typeof(Image), typeof(Button));
             RectTransform rt = obj.GetComponent<RectTransform>();
@@ -280,7 +389,7 @@ namespace KaCMultiplayer.Trade
             rt.anchoredPosition = new Vector2(x, y);
 
             Image img = obj.GetComponent<Image>();
-            img.color = colour;
+            img.color = cButton;
 
             Button b = obj.GetComponent<Button>();
             b.targetGraphic = img;

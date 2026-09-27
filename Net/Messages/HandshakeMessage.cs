@@ -24,16 +24,26 @@ namespace KaCMultiplayer.Net.Messages
         /// <summary>True when the session is resuming a saved game rather than starting fresh.</summary>
         public bool LoadingSave;
 
+        /// <summary>
+        /// The host's mod version, so a guest on a different build is told (see
+        /// SessionHandlers.OnHandshake). Last on the wire and read only if present: a build from
+        /// before this field reads the two above and stops, and a newer one reads "" from a host
+        /// that predates it.
+        /// </summary>
+        public string HostVersion = "";
+
         public void Serialize(Message m)
         {
             m.AddUShort(AssignedClientId);
             m.AddBool(LoadingSave);
+            m.AddString(HostVersion ?? "");
         }
 
         public void Deserialize(Message m)
         {
             AssignedClientId = m.GetUShort();
             LoadingSave = m.GetBool();
+            HostVersion = m.UnreadBits > 0 ? m.GetString() : "";
         }
     }
 }

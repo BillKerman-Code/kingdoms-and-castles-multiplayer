@@ -167,6 +167,69 @@ namespace KaCMultiplayer.Lobby
             if (label != null) label.text = text;
         }
 
+        /// <summary>
+        /// A button's real height, or <paramref name="fallback"/> if it has none.
+        ///
+        /// Read rather than assumed, because a cloned real button carries whatever size the
+        /// original artist gave it, and that size is not something this file can know ahead of
+        /// time. A caller laying out several buttons in a column uses this to space them by what
+        /// they actually measure, rather than by a guess sized for the old flat rectangles, which
+        /// is what first put a real button's bottom edge outside its own panel.
+        /// </summary>
+        public static float Height(Button b, float fallback)
+        {
+            if (b == null) return fallback;
+            RectTransform rt = b.GetComponent<RectTransform>();
+            if (rt == null || rt.sizeDelta.y <= 0f) return fallback;
+            return rt.sizeDelta.y;
+        }
+
+        /// <summary>
+        /// The panel's own background, as a sprite a caller can paint onto ITS OWN Image, rather
+        /// than the panel itself.
+        ///
+        /// WHY THIS EXISTS SEPARATELY FROM <see cref="Build"/>. Reusing the donor's Container
+        /// outright, the way AllianceRequestWindow and DealRequestWindow do, only works for a
+        /// simple title-and-body layout: the Title and Description nodes sit at whatever fixed
+        /// positions the artist put them at, and a caller with its OWN bespoke content (a resource
+        /// grid, in ResourcePicker's case) would have that content collide with them. This gives
+        /// just the art -- sprite, type and colour, exactly as the donor drew it -- so a caller can
+        /// apply it to a panel it fully controls the size and children of, and leaves the donor's
+        /// Title/Description/Button untouched for whatever the caller does with them separately
+        /// (or not at all).
+        ///
+        /// False, having logged why, if the Container has no Image to read. Not fatal to the
+        /// caller: a panel that keeps its flat colour is still a working panel.
+        /// </summary>
+        public static bool TryGetBackground(Panel panel, out Sprite sprite, out Image.Type type, out Color color)
+        {
+            sprite = null;
+            type = Image.Type.Simple;
+            color = Color.white;
+
+            try
+            {
+                if (panel == null || panel.Container == null) return false;
+
+                Image img = panel.Container.GetComponent<Image>();
+                if (img == null)
+                {
+                    NetLog.Info("K&C-styled popup: modal Container has no Image to borrow a background from");
+                    return false;
+                }
+
+                sprite = img.sprite;
+                type = img.type;
+                color = img.color;
+                return sprite != null;
+            }
+            catch (Exception e)
+            {
+                NetLog.Error("reading a K&C-styled popup background", e);
+                return false;
+            }
+        }
+
         /// <summary>Wires a button's click, replacing whatever it was already wired to.</summary>
         public static void SetClick(Button b, UnityEngine.Events.UnityAction onClick)
         {

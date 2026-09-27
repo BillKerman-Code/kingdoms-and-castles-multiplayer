@@ -273,6 +273,12 @@ namespace KaCMultiplayer.Net
             NetRegistry.OnClient<EconomySnapshotMessage>(NetMessageId.EconomySnapshot,
                 (m, ctx) => ApplyEconomySnapshot(m));
 
+            NetRegistry.Register<StorageSnapshotMessage>(NetMessageId.StorageSnapshot);
+            NetRegistry.OnServer<StorageSnapshotMessage>(NetMessageId.StorageSnapshot,
+                (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) StorageSync.Apply(m); });
+            NetRegistry.OnClient<StorageSnapshotMessage>(NetMessageId.StorageSnapshot,
+                (m, ctx) => StorageSync.Apply(m));
+
             NetRegistry.Register<KeepUpgradeMessage>(NetMessageId.KeepUpgrade);
             NetRegistry.OnServer<KeepUpgradeMessage>(NetMessageId.KeepUpgrade,
                 (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) ApplyKeepUpgrade(m); });
@@ -319,6 +325,14 @@ namespace KaCMultiplayer.Net
             NetRegistry.OnClient<ShipHealthMessage>(NetMessageId.ShipHealth,
                 (m, ctx) => ApplyShipHealth(m));
 
+            NetRegistry.Register<MerchantSpawnMessage>(NetMessageId.MerchantSpawn);
+            NetRegistry.OnClient<MerchantSpawnMessage>(NetMessageId.MerchantSpawn,
+                (m, ctx) => ApplyMerchantSpawn(m));
+
+            NetRegistry.Register<RaiderBoatsMessage>(NetMessageId.RaiderBoats, NetDelivery.Unreliable);
+            NetRegistry.OnClient<RaiderBoatsMessage>(NetMessageId.RaiderBoats,
+                (m, ctx) => RaiderSync.Apply(m));
+
             NetRegistry.Register<MerchantTradeMessage>(NetMessageId.MerchantTrade);
             NetRegistry.OnServer<MerchantTradeMessage>(NetMessageId.MerchantTrade,
                 (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) ApplyMerchantTrade(m); });
@@ -341,6 +355,66 @@ namespace KaCMultiplayer.Net
                 (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) ApplyPlayerRelation(m); });
             NetRegistry.OnClient<PlayerRelationMessage>(NetMessageId.PlayerRelation,
                 (m, ctx) => ApplyPlayerRelation(m));
+
+            // AI kingdoms. They run on the host only, so every one of these is either the host
+            // telling a guest something (roster, answer, proposal) or a guest asking the host
+            // (request, answer to a proposal) -- never relayed on to anyone else.
+            NetRegistry.Register<AiRosterMessage>(NetMessageId.AiRoster);
+            NetRegistry.OnClient<AiRosterMessage>(NetMessageId.AiRoster,
+                (m, ctx) => AiDiplomacy.ApplyRoster(m));
+
+            NetRegistry.Register<AiRequestMessage>(NetMessageId.AiRequest);
+            NetRegistry.OnServer<AiRequestMessage>(NetMessageId.AiRequest,
+                (m, ctx) => AiDiplomacy.HandleRemoteRequest(m, ctx.SenderId));
+
+            NetRegistry.Register<AiResultMessage>(NetMessageId.AiResult);
+            NetRegistry.OnClient<AiResultMessage>(NetMessageId.AiResult,
+                (m, ctx) => AiDiplomacy.ApplyResult(m));
+
+            NetRegistry.Register<AiProposalMessage>(NetMessageId.AiProposal);
+            NetRegistry.OnClient<AiProposalMessage>(NetMessageId.AiProposal,
+                (m, ctx) => KaCMultiplayer.Lobby.AiProposalWindow.Enqueue(m));
+
+            NetRegistry.Register<AiProposalAnswerMessage>(NetMessageId.AiProposalAnswer);
+            NetRegistry.OnServer<AiProposalAnswerMessage>(NetMessageId.AiProposalAnswer,
+                (m, ctx) => AiDiplomacy.HandleProposalAnswer(m, ctx.SenderId));
+
+            NetRegistry.Register<DiplomacyRefreshRequestMessage>(NetMessageId.DiplomacyRefresh);
+            NetRegistry.OnServer<DiplomacyRefreshRequestMessage>(NetMessageId.DiplomacyRefresh,
+                (m, ctx) =>
+                {
+                    SessionHandlers.SendRelationsTo(ctx.SenderId);
+                    AiDiplomacy.SendRosterTo(ctx.SenderId);
+                });
+
+            // The host's "DRAGON SIGHTED!" banner; see Net/DragonAlerts.cs.
+            NetRegistry.Register<DragonSightedMessage>(NetMessageId.DragonSighted);
+            NetRegistry.OnClient<DragonSightedMessage>(NetMessageId.DragonSighted,
+                (m, ctx) => DragonAlerts.Apply(m));
+
+            // The host's calendar, so a guest's cannot drift; see Net/ClockSync.cs.
+            NetRegistry.Register<ClockSyncMessage>(NetMessageId.ClockSync);
+            NetRegistry.OnClient<ClockSyncMessage>(NetMessageId.ClockSync,
+                (m, ctx) => ClockSync.Apply(m));
+
+            // The AI kingdoms' buildings, host to guests; see Net/AiMirror.cs.
+            NetRegistry.Register<AiBuildMessage>(NetMessageId.AiBuild);
+            NetRegistry.OnClient<AiBuildMessage>(NetMessageId.AiBuild,
+                (m, ctx) => AiMirror.Apply(m));
+
+            // Companion mods. Opaque to us, relayed to everyone; see Net/AddonChannel.cs.
+            NetRegistry.Register<AddonMessage>(NetMessageId.Addon);
+            NetRegistry.OnServer<AddonMessage>(NetMessageId.Addon,
+                (m, ctx) =>
+                {
+                    AddonChannel.StampOnHost(m, ctx);
+                    if (NetRouter.RelayAndApply(m, ctx)) AddonChannel.Dispatch(m);
+                });
+            NetRegistry.OnClient<AddonMessage>(NetMessageId.Addon,
+                (m, ctx) => AddonChannel.Dispatch(m));
+
+            // A guest reports its build right after the handshake; see SessionHandlers.
+            AddonChannel.Listen(SessionHandlers.VersionChannel, SessionHandlers.OnGuestVersion);
 
             // ---- Tier 4: world and save state ---------------------------------
             //
@@ -443,6 +517,7 @@ namespace KaCMultiplayer.Net
         {
             m.ApplyTo(LobbySettings.Current);
             LobbySettings.Current.ApplyToWorld();
+            Main.ApplyAiKingdomConfig();
 
             NetLog.Info("lobby settings: '" + m.ServerName + "' max=" + m.MaxPlayers +
                         " locked=" + m.Locked + " size=" + m.WorldSize + " type=" + m.WorldType);
@@ -473,6 +548,16 @@ namespace KaCMultiplayer.Net
         {
             try
             {
+                // A seed is for a lobby. Regenerating here would wipe a running game on this machine
+                // (every kingdom is reset below) while the host carries on in the real one, which
+                // is what happened to every guest when a host in its ESC menu let someone rejoin.
+                // The host no longer sends one then, and this is the backstop for any that do.
+                if (Main.GameInProgress)
+                {
+                    NetLog.Warn("world seed " + m.Seed + " arrived mid-game; ignored, this game's world is kept");
+                    return;
+                }
+
                 NetLog.Info("world seed " + m.Seed + ", regenerating");
 
                 // Guarded per player, because everything that matters here happens AFTER this loop.
@@ -984,68 +1069,77 @@ namespace KaCMultiplayer.Net
 
             try
             {
-                building.UniqueName = s.UniqueName;
-                building.customName = s.CustomName;
-                building.transform.position = s.GlobalPosition;
-                building.transform.GetChild(0).rotation = s.Rotation;
-                building.transform.GetChild(0).localPosition = s.LocalPosition;
-
-                // A building is COMMISSIONED by CompleteBuild, not by the value of its 'built'
-                // field. CompleteBuild is the only thing that sends OnBuilt, registers the
-                // building's IResourceProviders with FreeResourceManager, calls
-                // Player.BuildingNowBuilt (which takes it off the landmass's unbuilt list and
-                // recalculates max storage), creates its worker jobs through TryAddJobs, and
-                // bakes its pathing.
-                //
-                // Writing 'built = true' by reflection did none of that, and then made it
-                // unrecoverable: BuildingCompleteBuildHook skips CompleteBuild on a building
-                // that already reports IsBuilt(), so the local simulation's own completion a
-                // moment later was suppressed as a "duplicate" and the building stayed
-                // uncommissioned for the rest of the session. That is the
-                // "skipped duplicate CompleteBuild for farm (...)" line in the logs, and the
-                // hook's own comment named this write as the first place to look.
-                //
-                // What that costs depends on how the building reached us. One that arrived
-                // through ApplyBuildPlace has had its providers and jobs set up already, by
-                // BuildingSaveData.UnpackStage2, so what it loses is OnBuilt, BuildingNowBuilt
-                // and BakePathing: it stays on the landmass's unbuilt list, its storage is
-                // never added to the kingdom's maximum, and the cells under it never get their
-                // pathing costs baked. One that arrived by snapshot alone, with no placement
-                // to unpack, loses the jobs and the FreeResourceManager registration as well,
-                // which on a farm is a field with no HarvesterJob that nobody can harvest.
-                //
-                // Ship-launch pads were the first case of this to be noticed (a pad with no
-                // ship) and were fixed narrowly; the cause was never specific to launch pads,
-                // so every building goes through CompleteBuild now.
-                //
-                // CompleteBuild is idempotent thanks to that same hook, so this is safe in
-                // either arrival order: if our own simulation finished the building first, the
-                // snapshot finds IsBuilt() already true and does nothing.
-                if (s.Built && !building.IsBuilt())
-                {
-                    building.CompleteBuild();
-                }
-                else if (!s.Built && building.IsBuilt())
-                {
-                    // Un-completing has no vanilla entry point, so the field write is all there
-                    // is. Only reachable if we ran ahead of the owner and finished a building
-                    // they still have under construction.
-                    SetPrivateField(building, "built", false);
-                }
-
-                SetPrivateField(building, "placed", s.Placed);
-                SetPrivateField(building, "resourceProgress", m.ResourceProgress);
-                SetPrivateField(building, "yearBuilt", s.YearBuilt);
-
-                building.Open = s.Open;
-                building.doBuildAnimation = s.DoBuildAnimation;
-                building.constructionPaused = s.ConstructionPaused;
-                building.constructionProgress = s.ConstructionProgress;
-                building.Life = s.Life;
-                building.ModifiedMaxLife = s.ModifiedMaxLife;
-                building.decayProtection = s.DecayProtection;
+                ApplyBuildingState(building, s, m.ResourceProgress);
             }
             catch (Exception ex) { NetLog.Error("build snapshot " + s.Guid, ex); }
+        }
+
+        /// <summary>
+        /// Brings a building this machine only mirrors up to date with its owner's copy. Shared by
+        /// players' buildings (ApplyBuildSnapshot) and AI kingdoms' (AiMirror).
+        /// </summary>
+        internal static void ApplyBuildingState(Building building, BuildingState s, float resourceProgress)
+        {
+            building.UniqueName = s.UniqueName;
+            building.customName = s.CustomName;
+            building.transform.position = s.GlobalPosition;
+            building.transform.GetChild(0).rotation = s.Rotation;
+            building.transform.GetChild(0).localPosition = s.LocalPosition;
+
+            // A building is COMMISSIONED by CompleteBuild, not by the value of its 'built'
+            // field. CompleteBuild is the only thing that sends OnBuilt, registers the
+            // building's IResourceProviders with FreeResourceManager, calls
+            // Player.BuildingNowBuilt (which takes it off the landmass's unbuilt list and
+            // recalculates max storage), creates its worker jobs through TryAddJobs, and
+            // bakes its pathing.
+            //
+            // Writing 'built = true' by reflection did none of that, and then made it
+            // unrecoverable: BuildingCompleteBuildHook skips CompleteBuild on a building
+            // that already reports IsBuilt(), so the local simulation's own completion a
+            // moment later was suppressed as a "duplicate" and the building stayed
+            // uncommissioned for the rest of the session. That is the
+            // "skipped duplicate CompleteBuild for farm (...)" line in the logs, and the
+            // hook's own comment named this write as the first place to look.
+            //
+            // What that costs depends on how the building reached us. One that arrived
+            // through ApplyBuildPlace has had its providers and jobs set up already, by
+            // BuildingSaveData.UnpackStage2, so what it loses is OnBuilt, BuildingNowBuilt
+            // and BakePathing: it stays on the landmass's unbuilt list, its storage is
+            // never added to the kingdom's maximum, and the cells under it never get their
+            // pathing costs baked. One that arrived by snapshot alone, with no placement
+            // to unpack, loses the jobs and the FreeResourceManager registration as well,
+            // which on a farm is a field with no HarvesterJob that nobody can harvest.
+            //
+            // Ship-launch pads were the first case of this to be noticed (a pad with no
+            // ship) and were fixed narrowly; the cause was never specific to launch pads,
+            // so every building goes through CompleteBuild now.
+            //
+            // CompleteBuild is idempotent thanks to that same hook, so this is safe in
+            // either arrival order: if our own simulation finished the building first, the
+            // snapshot finds IsBuilt() already true and does nothing.
+            if (s.Built && !building.IsBuilt())
+            {
+                building.CompleteBuild();
+            }
+            else if (!s.Built && building.IsBuilt())
+            {
+                // Un-completing has no vanilla entry point, so the field write is all there
+                // is. Only reachable if we ran ahead of the owner and finished a building
+                // they still have under construction.
+                SetPrivateField(building, "built", false);
+            }
+
+            SetPrivateField(building, "placed", s.Placed);
+            SetPrivateField(building, "resourceProgress", resourceProgress);
+            SetPrivateField(building, "yearBuilt", s.YearBuilt);
+
+            building.Open = s.Open;
+            building.doBuildAnimation = s.DoBuildAnimation;
+            building.constructionPaused = s.ConstructionPaused;
+            building.constructionProgress = s.ConstructionProgress;
+            building.Life = s.Life;
+            building.ModifiedMaxLife = s.ModifiedMaxLife;
+            building.decayProtection = s.DecayProtection;
         }
 
         /// <summary>
@@ -1204,7 +1298,7 @@ namespace KaCMultiplayer.Net
                 r.Set(FreeResourceType.Tree, m.Tree);
                 r.Set(FreeResourceType.Stone, m.Stone);
                 r.Set(FreeResourceType.Charcoal, m.Charcoal);
-                r.Set(FreeResourceType.Gold, m.Gold);
+                r.Set(FreeResourceType.Gold, 0);
                 r.Set(FreeResourceType.IronOre, m.Iron);
                 r.Set(FreeResourceType.Tools, m.Tools);
                 r.Set(FreeResourceType.Armament, m.Armament);
@@ -1216,7 +1310,12 @@ namespace KaCMultiplayer.Net
                 // copy would only be read back a frame later by something that could have read
                 // the player.
                 if (player.inst != null)
+                {
                     player.inst.resourcesTotal = r;
+                    // Gold is treasury state, separate from Player.resourcesTotal.
+                    if (player.inst.PlayerLandmassOwner != null)
+                        player.inst.PlayerLandmassOwner.Gold = Math.Max(0, m.Gold);
+                }
             }
             catch (Exception ex) { NetLog.Error("economy snapshot", ex); }
         }
@@ -1486,6 +1585,11 @@ namespace KaCMultiplayer.Net
 
             using (NetApply.Scope())
                 KaCMultiplayer.Combat.CombatSync.ApplyShipHealth(m);
+        }
+
+        private static void ApplyMerchantSpawn(MerchantSpawnMessage m)
+        {
+            MerchantSync.Apply(m);
         }
 
         private static void ApplyMerchantTrade(MerchantTradeMessage m)
@@ -2076,6 +2180,12 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private static void RecordKingdomLabel(KingdomLabelMessage m, NetContext ctx)
         {
+            // An empty name is not a rename. A joining player's game announces its kingdom before
+            // it has one -- before the save has even arrived -- and taking that at its word wiped
+            // a returning player's saved name: the next save held "" for them, and on the load
+            // after that their game fell back to the save's own town name, the host's.
+            if (string.IsNullOrEmpty(m.KingdomName) || m.KingdomName.Trim().Length == 0) return;
+
             SessionPlayer player;
             if (NetPlayers.TryGet(ctx.SenderId, "kingdom label", out player))
                 player.kingdomName = m.KingdomName;
@@ -2085,6 +2195,8 @@ namespace KaCMultiplayer.Net
 
         private static void ApplyKingdomLabel(KingdomLabelMessage m)
         {
+            if (string.IsNullOrEmpty(m.KingdomName) || m.KingdomName.Trim().Length == 0) return;   // see RecordKingdomLabel
+
             SessionPlayer player;
             if (!NetPlayers.TryGet(m.Origin, "kingdom label", out player)) return;
 

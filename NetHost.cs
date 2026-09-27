@@ -79,8 +79,15 @@ namespace KaCMultiplayer
                     // kingdom, and given a brand new one on top of a world that already held
                     // theirs. LoadIdentity.IsLoadedSession stays true for the life of a loaded
                     // session, which is the question actually being asked here.
+                    //
+                    // A game in progress counts too, even one that began as a fresh map: whoever is
+                    // connecting can only be a returning player, whose kingdom is in the world the
+                    // host is about to send, so naming a new one is the last thing they should do.
                     LoadingSave = SteamLobby.loadingSave
                                || KaCMultiplayer.LoadSaveOverrides.LoadIdentity.IsLoadedSession
+                               || Main.GameInProgress,
+
+                    HostVersion = Main.ModVersion
                 }, ev.Client.Id);
             };
 

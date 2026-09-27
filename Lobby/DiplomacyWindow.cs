@@ -179,6 +179,10 @@ namespace KaCMultiplayer.Lobby
 
                 close.onClick.AddListener(Hide);
 
+                // The game's own Hall of Diplomacy art over the mod's prefab. Anything it cannot
+                // find is left exactly as the prefab drew it.
+                KacGameArt.SkinWindow(root);
+
                 root.SetActive(false);
                 return true;
             }
@@ -231,6 +235,10 @@ namespace KaCMultiplayer.Lobby
                     return a.inst.PlayerLandmassOwner.teamId.CompareTo(b.inst.PlayerLandmassOwner.teamId);
                 });
 
+                // AI kingdoms, listed after the players: the host's own, or on a guest the roster
+                // the host sends. Their answers come from AiDiplomacy.
+                List<AiDiplomacy.AiView> ais = AiDiplomacy.ViewsFor(localTeam);
+
                 // Everything the rows display. If none of it moved, the rows on screen are already
                 // right and rebuilding them would only make them blink.
                 System.Text.StringBuilder sig = new System.Text.StringBuilder();
@@ -242,6 +250,13 @@ namespace KaCMultiplayer.Lobby
                        .Append(peers[i].isGhost ? '1' : '0').Append(':')
                        .Append(peers[i].kingdomName).Append('|');
                 }
+                for (int i = 0; i < ais.Count; i++)
+                {
+                    sig.Append("ai").Append(ais[i].Team).Append(':')
+                       .Append((int)PlayerRelations.Get(localTeam, ais[i].Team)).Append(':')
+                       .Append(ais[i].Standing).Append(':')
+                       .Append(ais[i].Name).Append('|');
+                }
 
                 string signature = sig.ToString();
                 if (signature == shownSignature) return;
@@ -250,6 +265,8 @@ namespace KaCMultiplayer.Lobby
                 ClearRows();
                 for (int i = 0; i < peers.Count; i++)
                     AddRow(peers[i], localTeam, peers[i].inst.PlayerLandmassOwner.teamId);
+                for (int i = 0; i < ais.Count; i++)
+                    AddAiRow(ais[i], localTeam);
             }
             catch (Exception ex) { NetLog.Error("refreshing the diplomacy list", ex); }
         }
@@ -263,10 +280,10 @@ namespace KaCMultiplayer.Lobby
             // with more than two players in a session that stops being obvious at a glance.
             string label = RowName(peer);
             if (peer.isGhost) label += "  (away)";
-            SetText(row, "PlayerName", label, Color.white);
+            SetText(row, "PlayerName", label, KacGameArt.BodyText(Color.white));
 
             World.Relations now = PlayerRelations.Get(localTeam, otherTeam);
-            SetText(row, "Relation", RelationLabel(now), RelationColour(now));
+            SetText(row, "Relation", RelationLabel(now), KacGameArt.Relation(RelationColour(now)));
 
             SetBanner(row, otherTeam);
 
@@ -314,6 +331,88 @@ namespace KaCMultiplayer.Lobby
             // restating them here.
             CloneRowButton(row, "Demand", "Demand", 1, delegate { ResourcePicker.Open(localTeam, target, false); });
             CloneRowButton(row, "SendAid", "Send Aid", 2, delegate { ResourcePicker.Open(localTeam, target, true); });
+
+            // Last, so the cloned Demand and Send Aid buttons get the game's art too.
+            KacGameArt.SkinRow(row);
+        }
+
+        /// <summary>
+        /// One AI kingdom's row. Same buttons, same "only the ones that mean something right now"
+        /// rule as a player's row, but each one asks the AI (AiDiplomacy), which answers at once
+        /// on this machine -- so the list is redrawn straight after, rather than waiting for a
+        /// message to come back the way a player's answer does. The name line also carries the
+        /// AI's opinion of you, because that is what decides every answer it gives.
+        /// </summary>
+        private static void AddAiRow(AiDiplomacy.AiView ai, int localTeam)
+        {
+            int aiTeam = ai.Team;
+
+            GameObject row = UnityEngine.Object.Instantiate(LobbyPrefabs.DiplomacyRow, content);
+            rows.Add(row);
+
+            string label = ai.Name + "  ·  Opinion: " + AiDiplomacy.StandingName(ai.Standing);
+            SetText(row, "PlayerName", label, KacGameArt.BodyText(Color.white));
+            FitText(row, "PlayerName");
+
+            World.Relations now = PlayerRelations.Get(localTeam, aiTeam);
+            SetText(row, "Relation", RelationLabel(now), KacGameArt.Relation(RelationColour(now)));
+
+            // Straight from AiDiplomacy: on a guest there is no LandmassOwner for an AI kingdom to
+            // read a banner off, only the flag the host sent.
+            Transform bannerNode = row.transform.Find("PlayerBanner");
+            RawImage bannerImg = bannerNode == null ? null : bannerNode.GetComponent<RawImage>();
+            Texture banner = AiDiplomacy.BannerFor(aiTeam);
+            if (bannerImg != null && banner != null) bannerImg.texture = banner;
+
+            bool allied = now == World.Relations.Allies;
+            bool atWar = now == World.Relations.Enemy;
+            int target = aiTeam;
+
+            Wire(row, "Neutral", delegate { AiDiplomacy.Execute(localTeam, target, Net.Messages.AiAction.Peace); Redraw(); });
+            SetActive(row, "Neutral", atWar);
+            SetButtonText(row, "Neutral", "Make Peace");
+
+            Wire(row, "Allies", delegate
+            {
+                AiDiplomacy.Execute(localTeam, target, allied ? Net.Messages.AiAction.BreakAlliance : Net.Messages.AiAction.Ally);
+                Redraw();
+            });
+            SetActive(row, "Allies", !atWar);
+            SetButtonText(row, "Allies", allied ? "Break Alliance" : "Ally");
+
+            Wire(row, "War", delegate { AiDiplomacy.Execute(localTeam, target, Net.Messages.AiAction.War); Redraw(); });
+            SetActive(row, "War", !atWar && !allied);
+
+            // The resource picker ends in PlayerRelations.Send, which hands an AI target to
+            // AiDiplomacy instead of sending a deal message nobody could answer.
+            CloneRowButton(row, "Demand", "Demand", 1, delegate { ResourcePicker.Open(localTeam, target, false); });
+            CloneRowButton(row, "SendAid", "Send Aid", 2, delegate { ResourcePicker.Open(localTeam, target, true); });
+
+            KacGameArt.SkinRow(row);
+        }
+
+        /// <summary>Redraws the list now, after an action this machine applied itself.</summary>
+        private static void Redraw()
+        {
+            shownSignature = null;
+            Refresh();
+        }
+
+        /// <summary>Lets a long label shrink to fit its row rather than run off the end.</summary>
+        private static void FitText(GameObject row, string node)
+        {
+            Transform t = row.transform.Find(node);
+            TextMeshProUGUI tmp = t == null ? null : t.GetComponent<TextMeshProUGUI>();
+            if (tmp == null) return;
+
+            if (!tmp.enableAutoSizing)
+            {
+                tmp.fontSizeMax = tmp.fontSize;
+                tmp.fontSizeMin = 10f;
+                tmp.enableAutoSizing = true;
+            }
+            tmp.enableWordWrapping = false;
+            tmp.overflowMode = TextOverflowModes.Ellipsis;
         }
 
         /// <summary>

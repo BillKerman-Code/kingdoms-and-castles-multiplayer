@@ -68,7 +68,11 @@ namespace KaCMultiplayer.Net
         /// never more than a window's worth queued, so draining quickly empties that window and
         /// nothing more. Rate was only ever a clumsy stand-in for the bound.
         /// </summary>
-        public const int ChunksPerTick = 16;
+        // Four 900-byte packets per pump is still about 180 KB/s, enough to move a
+        // five-megabyte world in about thirty seconds, without overflowing Steam's send queue
+        // and starving small gameplay messages. Sixteen produced tens of thousands of
+        // k_EResultLimitExceeded failures in one real join.
+        public const int ChunksPerTick = 4;
 
         // ---- receive side -----------------------------------------------------
 
@@ -97,7 +101,34 @@ namespace KaCMultiplayer.Net
             public SaveTransferMessage Message;
         }
 
-        public static readonly Queue<OutgoingChunk> Outgoing = new Queue<OutgoingChunk>();
+        private static readonly Queue<OutgoingChunk> Outgoing = new Queue<OutgoingChunk>();
+
+        /// <summary>
+        /// Which (client, chunk) pairs are already waiting in <see cref="Outgoing"/>.
+        ///
+        /// A chunk is queued at most once per client. A joiner that asked again for something
+        /// already on its way used to get a second copy queued behind the first, and a stalled
+        /// joiner asked twenty times a second: over a thousand copies a second into a queue that
+        /// drains two hundred. The chunks it actually lacked sat behind thousands of copies of the
+        /// ones it had, and the loading bar stopped (seen at 25% of a 3.2 MB save, 2026-09-27).
+        /// </summary>
+        private static readonly HashSet<long> queued = new HashSet<long>();
+
+        private static long QueueKey(ushort clientId, int chunkId)
+        {
+            return ((long)clientId << 32) | (uint)chunkId;
+        }
+
+        /// <summary>
+        /// Host side: queues one chunk for one client, unless that chunk is already waiting for
+        /// them. Returns whether it was queued.
+        /// </summary>
+        public static bool Enqueue(ushort clientId, SaveTransferMessage message)
+        {
+            if (message == null || !queued.Add(QueueKey(clientId, message.ChunkId))) return false;
+            Outgoing.Enqueue(new OutgoingChunk { ClientId = clientId, Message = message });
+            return true;
+        }
 
         /// <summary>
         /// Clients that have gone while their save was still being sent.
@@ -126,6 +157,7 @@ namespace KaCMultiplayer.Net
         {
             departed.Add(clientId);
             sending.Remove(clientId);
+            queued.RemoveWhere(k => (ushort)(k >> 32) == clientId);
 
             if (Outgoing.Count == 0) return 0;
 
@@ -181,7 +213,9 @@ namespace KaCMultiplayer.Net
             rounds = 0;
             awaiting = 0;
             bytesReceived = 0;
+            requestedAt = new float[0];
             Outgoing.Clear();
+            queued.Clear();
         }
 
         /// <summary>
@@ -238,6 +272,10 @@ namespace KaCMultiplayer.Net
             {
                 OutgoingChunk chunk = Outgoing.Dequeue();
                 if (chunk == null) continue;
+
+                // Leaving the queue, so a later request can queue it again. That is how a chunk
+                // that really was lost on the way gets sent a second time.
+                if (chunk.Message != null) queued.Remove(QueueKey(chunk.ClientId, chunk.Message.ChunkId));
 
                 // Belt as well as braces. Forget() clears a departing client's chunks, but a
                 // disconnect that arrives some other way must not be able to spend the budget of
@@ -316,6 +354,7 @@ namespace KaCMultiplayer.Net
             resuming = m.Resume;
             buffer = new byte[m.SaveSize];
             chunkSeen = new bool[m.TotalChunks];
+            requestedAt = new float[m.TotalChunks];
             bytesReceived = 0;
             lastChunkAt = UnityEngine.Time.unscaledTime;
             lastRequestAt = lastChunkAt;
@@ -327,6 +366,7 @@ namespace KaCMultiplayer.Net
             // which is the duplicate flood this whole design exists to avoid, reintroduced at the
             // one moment it is guaranteed to happen.
             awaiting = m.TotalChunks < WindowChunks ? m.TotalChunks : WindowChunks;
+            for (int i = 0; i < awaiting; i++) requestedAt[i] = lastChunkAt;
 
             try { LobbyScreen.LoadingPanel.SetActive(true); }
             catch (Exception ex) { NetLog.Warn("save transfer: could not show the loading panel, " + ex.Message); }
@@ -358,6 +398,13 @@ namespace KaCMultiplayer.Net
         private static int awaiting;
 
         /// <summary>
+        /// When each chunk was last asked for (the first window counts as asked when it starts).
+        /// A chunk asked for less than <see cref="StallSeconds"/> ago is on its way, and asking
+        /// again only puts a second copy in the host's queue.
+        /// </summary>
+        private static float[] requestedAt = new float[0];
+
+        /// <summary>
         /// Asks the host for the next window, and keeps asking until the world is here.
         ///
         /// THE TRANSFER IS PULLED, NOT PUSHED. The host sends one window unprompted and then waits;
@@ -387,16 +434,26 @@ namespace KaCMultiplayer.Net
 
             // Or it has gone quiet, which means the last window lost something and the request that
             // replaces it has to be built from whatever is still missing.
-            bool quiet = now - lastChunkAt >= StallSeconds;
+            //
+            // Quiet since the last chunk AND the last request. Measured from the last chunk alone,
+            // a quiet spell stayed quiet until something new arrived, and this asked again every
+            // MinRequestGap -- twenty times a second, for the same chunks -- burying them in the
+            // host's queue behind copies of themselves. That is what stopped a join at 25%.
+            bool quiet = now - Math.Max(lastChunkAt, lastRequestAt) >= StallSeconds;
 
             if (!windowMostlyIn && !quiet) return;
             if (now - lastRequestAt < MinRequestGap) return;   // never faster than this
 
+            // Only what is missing and not already on its way. The chunks of the window still in
+            // flight used to be asked for again with every new window, a quarter of each request
+            // spent duplicating the last one.
             List<int> missing = new List<int>();
             for (int i = 0; i < chunkSeen.Length && missing.Count < WindowChunks; i++)
-                if (!chunkSeen[i]) missing.Add(i);
+                if (!chunkSeen[i] && now - requestedAt[i] >= StallSeconds) missing.Add(i);
 
-            if (missing.Count == 0) return;   // nothing left; IsComplete will finish it
+            if (missing.Count == 0) return;   // all on their way, or nothing left
+
+            for (int i = 0; i < missing.Count; i++) requestedAt[missing[i]] = now;
 
             lastRequestAt = now;
             awaiting = missing.Count;
@@ -512,6 +569,7 @@ namespace KaCMultiplayer.Net
 
             try
             {
+                // The save arrives uncompressed; see SessionHandlers.SendSaveBytes for why.
                 Main.LoadSaveLoadHook.saveBytes = buffer;
                 Main.LoadSaveLoadHook.fromNetwork = true;
 
