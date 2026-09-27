@@ -95,8 +95,15 @@ namespace KaCMultiplayer
                     // kingdom, and given a brand new one on top of a world that already held
                     // theirs. LoadIdentity.IsLoadedSession stays true for the life of a loaded
                     // session, which is the question actually being asked here.
-                    LoadingSave = SteamLobby.loadingSave
+                    //
+                    // Main.PlayHasBegun is the third case and it was missing: a fresh session that
+                    // has reached the world. Somebody rejoining one was told "fresh game" and sent
+                    // to found a second kingdom while the host was streaming them the live world.
+                    // Their kingdom is in that snapshot, so they wait for it instead, in the lobby,
+                    // where the transfer progress bar is.
+                    WorldComesFromHost = SteamLobby.loadingSave
                                || KaCMultiplayer.LoadSaveOverrides.LoadIdentity.IsLoadedSession
+                               || Main.PlayHasBegun
                 }, ev.Client.Id);
             };
 

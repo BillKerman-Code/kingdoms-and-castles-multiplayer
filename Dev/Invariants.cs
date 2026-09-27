@@ -90,6 +90,11 @@ namespace KaCMultiplayer.Dev
             AbandonedPathsAreClosed();
             BuildingJobsAreRegistered("in the running session");
             RecycledPendingMessagesDropTheirOldEvents();
+
+            // Last, deliberately: if the guard it checks is ever missing, the act of checking
+            // rebuilds the world this suite is running in, and every check after it would fail for
+            // a reason that has nothing to do with what it tests.
+            APlayedWorldIsNeverRegenerated();
         }
 
         // ---- CLASS 1: A PER-LANDMASS ARRAY SIZED BEFORE THE MAP EXISTED -------------------
@@ -1183,6 +1188,69 @@ namespace KaCMultiplayer.Dev
             {
                 check("the pending message check finished without throwing", false);
                 Main.LogEx("[SELFTEST] pending messages", ex);
+            }
+        }
+
+        // ---- CLASS 18: A WORLD SEED ARRIVING AFTER PLAY BEGAN ----------------------------
+
+        /// <summary>
+        /// A map seed must not rebuild a world that is being played in.
+        ///
+        /// Receiving one resets every kingdom and regenerates the map, which is right in the lobby
+        /// and ruinous afterwards. A player kicked from a year-30 session was sent one while
+        /// rejoining, because the host had a menu open and the code asked
+        /// <c>GameState.IsPlayMode()</c> whether a game was running: it reads false behind any menu,
+        /// so a live session looked like a lobby. That player restarted on a brand new map while the
+        /// host carried on with the real game.
+        ///
+        /// Checked by actually handing the client handler a seed and looking at what survives,
+        /// rather than by reading the flag: the flag is the fix, the world is the promise. The seed
+        /// used is deliberately not this world's, so a regeneration could not be mistaken for a
+        /// no-op.
+        /// </summary>
+        private static void APlayedWorldIsNeverRegenerated()
+        {
+            try
+            {
+                check("the session remembers that play has begun, whatever menu is open",
+                      Main.PlayHasBegun);
+
+                NetRegistry.Handler handler = NetRegistry.HandlerFor(NetMessageId.WorldSeed, false);
+                if (handler == null)
+                {
+                    check("the world seed message has a client handler", false);
+                    return;
+                }
+
+                int seedBefore = World.inst.seed;
+                int keepsBefore = 0;
+                foreach (SessionPlayer p in Main.kCPlayers.Values)
+                    if (p != null && p.inst != null && p.inst.keep != null) keepsBefore++;
+
+                handler(new WorldSeedMessage
+                {
+                    Seed = seedBefore + 1,
+                    MapBias = (int)World.inst.generatedMapsBias,
+                    MapSize = (int)World.inst.generatedMapSize,
+                    RiverLakes = (int)World.inst.generatedRiverLakes
+                }, new NetContext(0, false));
+
+                int keepsAfter = 0;
+                foreach (SessionPlayer p in Main.kCPlayers.Values)
+                    if (p != null && p.inst != null && p.inst.keep != null) keepsAfter++;
+
+                check("a map seed arriving mid-game leaves the map alone",
+                      World.inst.seed == seedBefore);
+                check("a map seed arriving mid-game leaves every kingdom standing",
+                      keepsAfter == keepsBefore);
+
+                log("[SELFTEST] mid-game world seed: seed " + seedBefore + " -> " + World.inst.seed
+                    + ", keeps " + keepsBefore + " -> " + keepsAfter);
+            }
+            catch (Exception ex)
+            {
+                check("the mid-game world seed check finished without throwing", false);
+                Main.LogEx("[SELFTEST] mid-game world seed", ex);
             }
         }
 

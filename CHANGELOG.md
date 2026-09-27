@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.15.5
+
+- Rejoining a game in progress gives you the game you left. A player who rejoined while the host
+  had a menu open used to be sent a new map instead of the world, so their kingdom was gone and
+  they started again on their own map while the host played on.
+- Rejoining players no longer land on the name-and-banner screen. Your kingdom is still there and
+  it comes from the host, so the lobby now shows the world arriving instead.
+- A player joining a lobby no longer rebuilds the map for everyone already in it.
+- Players with no kingdom in a game that has started are turned away even when the host has a menu
+  open.
+
 ## 0.15.4
 
 - The game no longer grinds to a halt and then drops you out of the session. A fault in the

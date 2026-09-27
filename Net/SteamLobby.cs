@@ -130,6 +130,11 @@ namespace KaCMultiplayer.Net
         /// </summary>
         public static void ResetNetworkState()
         {
+            // Before anything else, and deliberately not inside an Attempt: a stale "play has
+            // begun" would have the next lobby send its joiners a live snapshot of a world that
+            // does not exist yet.
+            Main.PlayHasBegun = false;
+
             Attempt("stop the server", delegate
             {
                 if (NetHost.server != null && NetHost.server.IsRunning) NetHost.server.Stop();

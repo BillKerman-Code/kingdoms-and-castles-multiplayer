@@ -497,6 +497,19 @@ namespace KaCMultiplayer.Net
         {
             try
             {
+                // THE ONE GUARD THAT MAKES THIS SAFE WHEREVER IT IS SENT FROM. Regenerating resets
+                // every kingdom and rebuilds the map from scratch, which is right in the lobby and
+                // catastrophic afterwards: it is what wiped a rejoining player's year-30 world and
+                // dropped them on a new map while the host played on. A seed cannot reproduce a
+                // world that has been played in anyway, buildings, trees and hazards are not in it,
+                // so there is never a reason to take one once play has begun.
+                if (Main.PlayHasBegun)
+                {
+                    NetLog.Warn("world seed " + m.Seed + " arrived after play began; ignored, "
+                                + "regenerating now would reset every kingdom on this machine");
+                    return;
+                }
+
                 NetLog.Info("world seed " + m.Seed + ", regenerating");
 
                 // Guarded per player, because everything that matters here happens AFTER this loop.

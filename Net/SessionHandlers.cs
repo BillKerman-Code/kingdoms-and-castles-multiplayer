@@ -34,7 +34,7 @@ namespace KaCMultiplayer.Net
         public static void OnHandshake(HandshakeMessage m)
         {
             NetLog.Info("handshake: assigned client id " + m.AssignedClientId +
-                        (m.LoadingSave ? ", loading a save" : ", fresh game"));
+                        (m.WorldComesFromHost ? ", the world comes from the host" : ", fresh game"));
 
             ModalDialog.Hide();
             Main.TransitionTo(MenuState.LobbyScreen);
@@ -67,25 +67,26 @@ namespace KaCMultiplayer.Net
             // picker. Both conditions have to hold to reach the Load screen, and if neither branch
             // is taken the player is simply left on the ServerLobby set above, silently. Log the
             // decision so the next run says which input was wrong rather than leaving us guessing.
-            NetLog.Info("handshake routing: LoadingSave=" + m.LoadingSave +
+            NetLog.Info("handshake routing: WorldComesFromHost=" + m.WorldComesFromHost +
                         " NetHost.IsRunning=" + NetHost.IsRunning +
                         " SteamLobby.loadingSave=" + SteamLobby.loadingSave);
 
-            if (m.LoadingSave && NetHost.IsRunning)
+            if (m.WorldComesFromHost && NetHost.IsRunning)
             {
                 NetLog.Info("handshake routing -> Load (save picker)");
                 Main.TransitionTo(MenuState.Load);
             }
-            else if (!m.LoadingSave)
+            else if (!m.WorldComesFromHost)
             {
                 NetLog.Info("handshake routing -> NameAndBanner");
                 Main.TransitionTo(MenuState.NameAndBanner);
             }
             else
             {
-                // Joining a host that is resuming a save. Do NOT send them to NameAndBanner: their
-                // kingdom already exists in that save and naming a new one is how a returning
-                // player ends up placing a second keep beside their own city.
+                // Joining a host that is resuming a save, or a game already in progress. Do NOT
+                // send them to NameAndBanner: their kingdom already exists in what the host is
+                // about to send, and naming a new one is how a returning player ends up placing a
+                // second keep beside their own city.
                 //
                 // Nothing to decide yet either, because the save has not arrived. It is streamed
                 // in chunks (see SaveTransfer) and SessionSave.Unpack then matches this player by
@@ -122,8 +123,10 @@ namespace KaCMultiplayer.Net
             //
             // Checked here rather than in the connection-approval callback because that runs before
             // the client has told us who they are; the steamId only arrives with this message.
-            if (GameState.inst != null && GameState.inst.IsPlayMode()
-                && !Main.kCPlayers.ContainsKey(m.SteamId))
+            // Main.PlayHasBegun, not GameState.IsPlayMode(): a host with the pause or save menu
+            // open is not in play mode, and a stranger walking in at that moment used to be let
+            // through into a world with nothing in it for them.
+            if (Main.PlayHasBegun && !Main.kCPlayers.ContainsKey(m.SteamId))
             {
                 NetLog.Info("refused " + m.Name + " (" + m.SteamId + "): game in progress and they have no kingdom here");
                 RefuseJoin(joiner, "Game in progress",
@@ -164,7 +167,14 @@ namespace KaCMultiplayer.Net
             // only a seed, which regenerates an empty map. That is what used to happen, a player
             // joining or reconnecting mid-game landed in a pristine world with no buildings, no
             // villagers and no kingdoms, with nothing logged to say so.
-            if (GameState.inst != null && GameState.inst.IsPlayMode())
+            //
+            // Main.PlayHasBegun rather than GameState.IsPlayMode() here too, and this is the one
+            // that cost a session. The host had the save or pause menu open while a kicked player
+            // rejoined, so play mode read false, the session looked like a lobby, and the rejoiner
+            // was handed a bare map seed instead of the world. Their machine regenerated the map
+            // and reset every kingdom: a brand new map and a fresh start on their side only, with
+            // the host still playing the real game.
+            if (Main.PlayHasBegun)
                 QueueResumeTransfer(joiner, m.Name);
             else if (SteamLobby.loadingSave)
                 QueueSaveTransfer(joiner);
@@ -496,12 +506,17 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private static void SyncFreshWorld(ushort clientId)
         {
-            NetRouter.Broadcast(WorldSeedMessage.ForCurrentWorld(), NetClient.client.Id);
-
-            // Only to the joiner: players already in the session have these, and a second
-            // copy would duplicate them. The seed above is sent first, so the client
-            // regenerates, suppressing its own hazards, before these arrive.
+            // The host is already in this world, and the seed below would regenerate it.
             if (clientId == NetClient.client.Id) return;
+
+            // TO THE JOINER, NOT TO EVERYBODY. This was a broadcast, so every guest already in the
+            // lobby rebuilt their map and had every kingdom reset each time somebody else arrived.
+            // They do not need it: they were sent the seed when they joined, and a map that really
+            // changes goes out from LobbyScreen.RegenerateWorld.
+            //
+            // Sent before the catch-up below, so the client regenerates, suppressing its own
+            // hazards, before those arrive.
+            NetRouter.SendTo(WorldSeedMessage.ForCurrentWorld(), clientId);
 
             try
             {

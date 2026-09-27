@@ -1171,6 +1171,15 @@ namespace KaCMultiplayer
 
         private void Update()
         {
+            // Has this session reached the world yet. See PlayHasBegun for why the answer has to
+            // be remembered rather than asked for.
+            if (!PlayHasBegun && InMultiplayer
+                && GameState.inst != null && GameState.inst.IsPlayMode())
+            {
+                PlayHasBegun = true;
+                helper.Log("[net] play has begun; joiners now get the live world, not a map seed");
+            }
+
             // Here rather than in FixedUpdate: a joiner is sent the world while the host is PAUSED,
             // and FixedUpdate does not run while it is. Paced off unscaled time inside, so the rate
             // on the wire is the same as it was on the fixed tick.
@@ -7815,6 +7824,24 @@ namespace KaCMultiplayer
         {
             get { return NetClient.client.IsConnected || NetHost.IsRunning; }
         }
+
+        /// <summary>
+        /// True once this session has actually entered the running world, and it STAYS true while
+        /// somebody is sitting in the pause, save or load menu.
+        ///
+        /// <c>GameState.IsPlayMode()</c> answers a different question: "is the world on screen
+        /// right this second", which is false whenever a menu is open over it. Several session
+        /// decisions were asking it "has play begun", and got the wrong answer for a host who had
+        /// pressed Escape. A player rejoining at that moment was treated as though the session were
+        /// still in the lobby, so instead of the live world they were sent a bare map seed, which
+        /// regenerates the map and resets every kingdom on arrival: they restarted on a new map
+        /// while the host carried on with the real game.
+        ///
+        /// Latched in <c>Update</c> rather than set at each entry point, so every way into the
+        /// world is covered, including ones written later, and cleared with the rest of the session
+        /// state in <c>SteamLobby.ResetNetworkState</c>.
+        /// </summary>
+        public static bool PlayHasBegun;
 
         public static bool UseVanillaSaveFormat = true;   // Shipped default: new dictionary save format (vanilla-openable). Set false only to fall back to the old SessionSave path.
 
