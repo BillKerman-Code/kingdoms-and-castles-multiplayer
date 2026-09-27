@@ -40,6 +40,8 @@ namespace KaCMultiplayer.Net
 
         private static readonly FieldInfo ResourceProgressField =
             typeof(Building).GetField("resourceProgress", BindingFlags.NonPublic | BindingFlags.Instance);
+        private static readonly MethodInfo BuildingVisibleMethod =
+            typeof(FogOfWar).GetMethod("BuildingVisible", BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance);
 
         // ---- host --------------------------------------------------------------------------
 
@@ -64,6 +66,10 @@ namespace KaCMultiplayer.Net
         private static readonly Dictionary<int, LandmassOwner> madeOwners = new Dictionary<int, LandmassOwner>();
 
         private static readonly Dictionary<Guid, Building> mirrored = new Dictionary<Guid, Building>();
+        // BuildingSaveData contains the host's seenByPlayer bit. That bit is not portable: each
+        // guest has their own explored map. Remember which AI buildings have had that host bit
+        // replaced with this machine's fog result so later updates preserve local discovery.
+        private static readonly HashSet<Guid> fogInitialised = new HashSet<Guid>();
         private static readonly HashSet<string> warnedNoPrefab = new HashSet<string>();
 
         private static long NowMs { get { return DateTimeOffset.Now.ToUnixTimeMilliseconds(); } }
@@ -132,7 +138,12 @@ namespace KaCMultiplayer.Net
                 }
 
                 bool wasBuilt = b.IsBuilt();
+                bool hadLocalFog = fogInitialised.Contains(s.Guid);
+                bool locallySeen = hadLocalFog && b.seenByPlayer;
                 NetRegistrations.ApplyBuildingState(b, s, m.ResourceProgress);
+                if (hadLocalFog) b.seenByPlayer = locallySeen;
+                mirrored[s.Guid] = b;
+                RefreshFog(b, !hadLocalFog);
 
                 // A building that has just finished shows its full model, flags included, for the
                 // first time. Only then: every other update leaves the flags as they were, and a
@@ -207,6 +218,7 @@ namespace KaCMultiplayer.Net
         {
             watched.Clear();
             mirrored.Clear();
+            fogInitialised.Clear();
             warnedNoPrefab.Clear();
 
             foreach (LandmassOwner lmo in madeOwners.Values)
@@ -283,12 +295,44 @@ namespace KaCMultiplayer.Net
             Player.inst.AddBuilding(building);
             World.inst.PlaceFromLoad(building);
             data.UnpackStage2(building);
-            building.SetVisibleForFog(false);
-
             mirrored[s.Guid] = building;
             Main.MarkBannersDirty();
             NetLog.Info("AI mirror: " + s.UniqueName + " for AI team " + building.TeamID() + " at " + s.GlobalPosition);
             return building;
+        }
+
+        /// <summary>
+        /// Re-evaluates mirrored AI buildings against this guest's fog. Called periodically so an
+        /// exploration ship revealing an island also reveals its kingdom without another building
+        /// update having to arrive from the host.
+        /// </summary>
+        public static void RefreshFog()
+        {
+            if (NetRouter.IsServer || !ClockSync.InGame || FogOfWar.inst == null || BuildingVisibleMethod == null) return;
+
+            foreach (Building b in new List<Building>(mirrored.Values))
+                if (b != null) RefreshFog(b, !fogInitialised.Contains(b.guid));
+        }
+
+        private static void RefreshFog(Building building, bool initialiseLocalDiscovery)
+        {
+            if (building == null || FogOfWar.inst == null || BuildingVisibleMethod == null) return;
+
+            try
+            {
+                bool visibleNow = (bool)BuildingVisibleMethod.Invoke(FogOfWar.inst, new object[] { building });
+                if (initialiseLocalDiscovery)
+                {
+                    // Unpack/ApplyBuildingState copied the host's discovery bit. Replace it before
+                    // SetVisibleForFog(false), whose vanilla behaviour intentionally preserves a
+                    // building that this particular player has already discovered.
+                    building.seenByPlayer = visibleNow;
+                    fogInitialised.Add(building.guid);
+                }
+
+                building.SetVisibleForFog(visibleNow);
+            }
+            catch (Exception ex) { NetLog.Error("refreshing AI building fog", ex); }
         }
 
         private static int LandmassAt(Vector3 position)

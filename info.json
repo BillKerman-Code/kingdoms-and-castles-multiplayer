@@ -3,5 +3,5 @@
     "name": "Kingdoms and Castles Multiplayer (Beta)",
     "description": "Steam-based multiplayer for Kingdoms and Castles. BETA / work in progress.\n\nHost or join through a Steam lobby. Every player builds and runs their own kingdom on a shared map.\n\nWhat works:\n- Steam lobby host and join, with chat in the lobby and in game\n- Shared map, with synced terrain, weather and trees\n- Buildings: placement, construction, completion, demolition and keeps\n- Villagers: spawns, deaths, and which house they live in\n- Troops and combat: armies, ships, siege catapults, dragons, Vikings and wolves\n- Shared foreign merchant ships and cross-player trade\n- Fire and destruction\n- Save and load a multiplayer session, and join a game already in progress\n\nBased on the KCM multiplayer mod, continued with the original author's permission. Thanks to them.",
     "author": "BrassyCrane",
-    "version": "0.13.62"
+    "version": "0.13.64"
 }

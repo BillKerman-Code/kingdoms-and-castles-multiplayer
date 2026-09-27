@@ -1028,6 +1028,12 @@ namespace KaCMultiplayer
             KaCMultiplayer.Net.StorageSync.Tick();
             KaCMultiplayer.LoadSaveOverrides.PostLoadVisualRepair.Tick();
 
+            // AI buildings are mirrored from the host, but exploration is local to each guest.
+            // Re-check occasionally so sailing into view reveals them and unexplored islands do
+            // not inherit the host's seenByPlayer save bit.
+            if (FixedUpdateInterval % 15 == 0)
+                KaCMultiplayer.Net.AiMirror.RefreshFog();
+
             // Repaint every flag in the world if somebody's colours or somebody's ground changed.
             // Coalesced, so a burst of building placements costs one repaint, not one each.
             RefreshBannersIfDirty();
@@ -1199,7 +1205,7 @@ namespace KaCMultiplayer
         /// Path.Combine and even File.ReadAllBytes were all refused as "illegal namespace reference
         /// to System.IO"), and one refusal fails the whole mod at launch.
         /// </summary>
-        public const string BuildVersion = "0.13.62";
+        public const string BuildVersion = "0.13.64";
 
         public static string ModVersion { get { return BuildVersion; } }
 
@@ -2076,6 +2082,28 @@ namespace KaCMultiplayer
             catch (Exception e)
             {
                 Main.helper.Log("Wolf den clearing patch failed (a cleared den can linger on other machines): " + e.Message);
+            }
+
+            // A player's building being closed: blocked if an AI kingdom's code did it, and logged
+            // with whoever did, either way. Its own try, and manual rather than an attribute, so a
+            // property setter this Harmony cannot find costs this guard and nothing else. See
+            // BuildingOpenGuardHook.
+            try
+            {
+                MethodInfo setOpen = typeof(Building).GetMethod(
+                    "set_Open",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+                if (setOpen != null)
+                    harmony.Patch(setOpen,
+                        new HarmonyMethod(typeof(BuildingOpenGuardHook).GetMethod("Prefix", BindingFlags.Public | BindingFlags.Static)),
+                        null, null);
+
+                Main.helper.Log($"Player building close guard patched ({setOpen != null})");
+            }
+            catch (Exception e)
+            {
+                Main.helper.Log("Player building close guard failed (an AI could close a player's building): " + e.Message);
             }
 
             PatchGhostKingdomFreeze(harmony);
@@ -5648,6 +5676,72 @@ namespace KaCMultiplayer
                 catch (Exception e) { LogEx("Home eviction ownership fix", e); }
 
                 return true;
+            }
+        }
+
+        /// <summary>
+        /// Prevents AI decision code from closing a human player's building. Multiplayer kingdoms
+        /// share Player-owned collections that vanilla AI assumes belong only to itself, so an AI
+        /// food or infrastructure intention can otherwise disable another kingdom's production.
+        /// Other close requests are allowed and logged to identify any remaining ownership leak.
+        /// </summary>
+        public class BuildingOpenGuardHook
+        {
+            private const int MaxLogged = 60;
+            private static int logged;
+
+            public static bool Prefix(Building __instance, bool value)
+            {
+                if (value || __instance == null || !NetClient.client.IsConnected) return true;
+
+                try
+                {
+                    if (!__instance.IsOpen()) return true;
+
+                    int team = __instance.TeamID();
+                    if (team < KaCMultiplayer.Net.PlayerRelations.MpTeamBase) return true;
+
+                    Type callerType;
+                    string caller = Caller(out callerType);
+                    bool fromAi = callerType != null && string.IsNullOrEmpty(callerType.Namespace)
+                                  && (callerType.Name.StartsWith("Intention_") || callerType.Name.StartsWith("AI"));
+
+                    if (logged < MaxLogged)
+                    {
+                        logged++;
+                        helper.Log("[OPENCLOSE] team " + team + "'s " + __instance.UniqueName + " at "
+                                   + __instance.transform.position + " closed by " + caller
+                                   + (fromAi ? "; refused, an AI kingdom does not close a player's buildings" : ""));
+                    }
+
+                    return !fromAi;
+                }
+                catch (Exception e)
+                {
+                    LogEx("player building close guard", e);
+                    return true;
+                }
+            }
+
+            private static string Caller(out Type type)
+            {
+                type = null;
+                StackTrace trace = new StackTrace(1, false);
+                for (int i = 0; i < trace.FrameCount; i++)
+                {
+                    MethodBase m = trace.GetFrame(i).GetMethod();
+                    Type t = m == null ? null : m.DeclaringType;
+                    if (t == null) continue;
+                    if (t == typeof(BuildingOpenGuardHook)) continue;
+
+                    while (t.DeclaringType != null) t = t.DeclaringType;
+                    if (t == typeof(Building)) continue;
+                    if (t.Namespace != null && t.Namespace.StartsWith("Harmony")) continue;
+
+                    type = t;
+                    return t.Name + "." + m.Name;
+                }
+                return "unknown";
             }
         }
 
