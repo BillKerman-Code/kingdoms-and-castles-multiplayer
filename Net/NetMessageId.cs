@@ -63,7 +63,10 @@
 
         // 1080-1089  economy
         EconomySnapshot = 1080,
-        StorageSnapshot = 1081,
+        TaxRate = 1081,
+        KingdomMirror = 1082,
+        KingdomMirrorRequest = 1083,
+        StorageSnapshot = 1084,
 
         // 1090-1109  population
         VillagerAdd = 1090,

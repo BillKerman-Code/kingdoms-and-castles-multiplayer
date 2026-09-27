@@ -1,4 +1,4 @@
-﻿using KaCMultiplayer.Lobby;
+using KaCMultiplayer.Lobby;
 using KaCMultiplayer.SaveIo;
 using Assets.Code;
 using Assets.Code.UI;
@@ -354,6 +354,90 @@ namespace KaCMultiplayer
         }
 
         /// <summary>
+        /// Stands in for the two calls through which resetting ONE kingdom wipes the job system
+        /// for ALL of them: <c>JobSystem.ClearAllJobs</c> in <c>Player.Reset</c>, and
+        /// <c>JobSystem.InitJobList</c> in <c>Player.ResetPerLandMassData</c>, which replaces the
+        /// whole job table with empty lists.
+        ///
+        /// Each building keeps its own list of jobs, and neither call touches those lists. So
+        /// resetting a remote kingdom (building a joining or rejoining player's kingdom object,
+        /// regenerating the map, the resets around a load) left every other building holding jobs
+        /// the job system no longer knew about. A construction site in that state never gets
+        /// another builder, because TryAddBuilderJobs only adds jobs while its list is short: the
+        /// "builders forget to finish after a rejoin" report, whose workaround was deleting the
+        /// site so it made fresh jobs. Only the local kingdom's reset clears the job system now;
+        /// single player always does, exactly as vanilla.
+        ///
+        /// During a load the remote kingdom being unpacked is briefly Player.inst, so this lets
+        /// InitJobList through there; PreserveLoadedJobsHook in SessionSave covers that case.
+        ///
+        /// Called from IL, by <see cref="PlayerResetJobsHook"/>. Public and static for that reason.
+        /// </summary>
+        public static void ClearAllJobsUnlessRemote(JobSystem jobs, Player resetting)
+        {
+            if (Main.InMultiplayer && resetting != Player.inst) return;
+            jobs.ClearAllJobs();
+        }
+
+        /// <summary>The InitJobList half of <see cref="ClearAllJobsUnlessRemote"/>.</summary>
+        public static void InitJobListUnlessRemote(JobSystem jobs, Player resetting)
+        {
+            if (Main.InMultiplayer && resetting != Player.inst) return;
+            jobs.InitJobList();
+        }
+
+        /// <summary>
+        /// Routes a Player method's call to <paramref name="gameMethod"/> on JobSystem through
+        /// <paramref name="guard"/>, with the Player itself pushed as the extra argument so the
+        /// guard can tell whose reset this is. Shared by both reset hooks below.
+        /// </summary>
+        private static IEnumerable<CodeInstruction> GuardJobSystemCall(
+            IEnumerable<CodeInstruction> instructions, string gameMethod, string guard, Action counted)
+        {
+            MethodInfo replacement = typeof(Main).GetMethod(guard);
+
+            foreach (CodeInstruction c in instructions)
+            {
+                MethodInfo target = c.operand as MethodInfo;
+                if (target != null && target.DeclaringType == typeof(JobSystem) && target.Name == gameMethod)
+                {
+                    // Labels stay on the original instruction; the pushed receiver goes first.
+                    yield return new CodeInstruction(OpCodes.Ldarg_0);
+                    c.opcode = OpCodes.Call;
+                    c.operand = replacement;
+                    counted();
+                }
+                yield return c;
+            }
+        }
+
+        /// <summary>Guards Player.Reset's ClearAllJobs. See <see cref="ClearAllJobsUnlessRemote"/>.</summary>
+        [HarmonyPatch(typeof(Player), "Reset")]
+        public class PlayerResetJobsHook
+        {
+            /// <summary>Call sites rewritten, counting both hooks. Harmony re-runs a transpiler
+            /// every time the method is patched again, so this can exceed two.</summary>
+            public static int Rewritten;
+
+            static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+            {
+                return GuardJobSystemCall(instructions, "ClearAllJobs", "ClearAllJobsUnlessRemote", () => Rewritten++);
+            }
+        }
+
+        /// <summary>Guards ResetPerLandMassData's InitJobList. See <see cref="ClearAllJobsUnlessRemote"/>.</summary>
+        [HarmonyPatch(typeof(Player), "ResetPerLandMassData")]
+        public class PlayerResetJobListHook
+        {
+            public static int Rewritten;
+
+            static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+            {
+                return GuardJobSystemCall(instructions, "InitJobList", "InitJobListUnlessRemote", () => Rewritten++);
+            }
+        }
+
+        /// <summary>
         /// The player whose kingdom owns a landmass, or null if nobody's does.
         ///
         /// Deliberately NOT <see cref="GetPlayerByTeamID"/>, whose fallback to the local player is
@@ -526,10 +610,12 @@ namespace KaCMultiplayer
         // quarries, all hired and fired by somebody else's settings, on every machine
         // independently.
         //
-        // These two hooks are the narrow seam that fixes it. JobSystem reaches the two pieces of
-        // per-landmass state that actually gate assignment through these accessors rather than by
-        // field, so redirecting them to the landmass's OWNER puts each island back under its own
-        // kingdom's rules without touching the engine itself.
+        // JobSystem reaches the two pieces of per-landmass state that actually gate assignment
+        // through Player.GetJobEnabledFlags and Player.GetJobPriorityOrder. Those are one-line
+        // getters, inside Mono's inlining threshold, so a Prefix on them never ran: that is why
+        // this fix once existed as two accessor hooks and peers' farms still went unstaffed. The
+        // transpiler below rewrites the CALL SITES in JobSystem.Update instead, to the two static
+        // helpers here, which answer with the landmass OWNER's row.
         //
         // The remaining Player.inst reads in that method are left alone on purpose:
         // JobFilledAvailable and JobCustomMaxEnabledFlag are scratch counters keyed by
@@ -537,39 +623,94 @@ namespace KaCMultiplayer
         // the table is all they need, and the loop bound is the landmass count, which is the same
         // number whoever you ask.
 
-        /// <summary>Answers with the landmass owner's enabled flags. See the note above.</summary>
-        [HarmonyPatch(typeof(Player), "GetJobEnabledFlags")]
-        public class PlayerJobEnabledFlagsHook
+        /// <summary>
+        /// A landmass's job enabled flags, from the kingdom that owns it.
+        /// Called in place of Player.GetJobEnabledFlags inside JobSystem.Update, so another
+        /// player's island is staffed by their settings. Single player: vanilla's own answer.
+        /// </summary>
+        public static bool[] JobEnabledFlagsFor(Player receiver, int landMass)
         {
-            public static bool Prefix(Player __instance, int landMass, ref bool[] __result)
+            Player owner = JobTableOwnerFor(receiver, landMass);
+            bool[][] table = owner != null ? owner.JobEnabledFlag : null;
+            if (table == null || landMass >= table.Length || table[landMass] == null)
+                return receiver.JobEnabledFlag[landMass];
+            return table[landMass];
+        }
+
+        /// <summary>
+        /// A landmass's job priority order, from the kingdom that owns it.
+        /// Same reason as <see cref="JobEnabledFlagsFor"/>; the two must agree, since the loop
+        /// reads flag j of one against slot j of the other.
+        /// </summary>
+        public static int[] JobPriorityOrderFor(Player receiver, int landMass)
+        {
+            Player owner = JobTableOwnerFor(receiver, landMass);
+            int[][] table = owner != null ? owner.JobPriorityOrder : null;
+            if (table == null || landMass >= table.Length || table[landMass] == null)
+                return receiver.JobPriorityOrder[landMass];
+            return table[landMass];
+        }
+
+        /// <summary>
+        /// Rewrites JobSystem.Update's two job-table getter calls to the owner-aware helpers above.
+        /// The call site is the only seam that survives inlining; see the note above.
+        /// Same stack shape (Player, int) in and array out, so the swap is one operand each.
+        /// </summary>
+        [HarmonyPatch(typeof(JobSystem), "Update")]
+        public class JobSystemOwnerTablesHook
+        {
+            /// <summary>How many call sites were rewritten, so a check can see the patch took.</summary>
+            public static int Rewritten;
+
+            static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
             {
-                Player owner = Main.JobTableOwnerFor(__instance, landMass);
-                if (owner == null) return true;
+                MethodInfo flags = typeof(Main).GetMethod("JobEnabledFlagsFor");
+                MethodInfo order = typeof(Main).GetMethod("JobPriorityOrderFor");
 
-                bool[][] table = owner.JobEnabledFlag;
-                if (table == null || landMass >= table.Length || table[landMass] == null) return true;
-
-                __result = table[landMass];
-                return false;
+                foreach (CodeInstruction c in instructions)
+                {
+                    MethodInfo target = c.operand as MethodInfo;
+                    if (target != null && target.DeclaringType == typeof(Player)
+                        && (c.opcode == OpCodes.Call || c.opcode == OpCodes.Callvirt))
+                    {
+                        if (target.Name == "GetJobEnabledFlags") { c.opcode = OpCodes.Call; c.operand = flags; Rewritten++; }
+                        else if (target.Name == "GetJobPriorityOrder") { c.opcode = OpCodes.Call; c.operand = order; Rewritten++; }
+                    }
+                    yield return c;
+                }
             }
         }
 
-        /// <summary>Answers with the landmass owner's priority order. See the note above.</summary>
-        [HarmonyPatch(typeof(Player), "GetJobPriorityOrder")]
-        public class PlayerJobPriorityOrderHook
-        {
-            public static bool Prefix(Player __instance, int landMass, ref int[] __result)
-            {
-                Player owner = Main.JobTableOwnerFor(__instance, landMass);
-                if (owner == null) return true;
-
-                int[][] table = owner.JobPriorityOrder;
-                if (table == null || landMass >= table.Length || table[landMass] == null) return true;
-
-                __result = table[landMass];
-                return false;
-            }
-        }
+        // WHO IS ELIGIBLE IS NOT WHO GETS PICKED. JobSystemOwnerTablesHook, just above, makes
+        // every machine agree on which villagers are eligible for a job and in what priority, but
+        // it does not stop the assignment itself. Job.UpdateAssignment is the vanilla method that
+        // actually calls Job.AssignEmployee for an ordinary job (checked against the shipped IL:
+        // BuilderJob and GuildBuilderJob, the two job types a construction site uses, both
+        // inherit it unmodified, neither overrides it), and JobSystem.Update's own loop calls it
+        // for every open job on every landmass, on every machine, once a frame, with no ownership
+        // check at all, run identically whether the landmass is this machine's own or not.
+        //
+        // So even with matching eligibility now, two machines can still independently assign
+        // DIFFERENT idle villagers to the SAME foreign job, because which villagers are idle
+        // RIGHT NOW is each machine's own local simulation, not something the settings fix
+        // synchronises. A foreign kingdom's storage buildings then get staffed by whichever
+        // villager THIS machine happened to pick rather than whichever one the owner's own
+        // machine actually picked, and drift out of step with the owner's real state. It is the same
+        // "everyone else holds a mirror that drifts" DealKind.Settled already documents for a
+        // diplomacy payment, reached here through job assignment instead of direct resource
+        // movement.
+        //
+        // (Job.AssignEmployee has two other callers, Building.SetAndAddJob (reached from every
+        // building's OnAddJobs via CompleteBuild) and Home.UpdateHomemakerAssignment, neither
+        // gated here. Left open deliberately: this closes the per-tick JobSystem.Update path,
+        // confirmed to matter for the symptom below; the other two need their own verification
+        // before gating.)
+        //
+        // Gated the same way BarracksTickForeignHook already gates Barracks.Tick: the kingdom's
+        // own machine decides, and its own broadcasts carry the result to everyone else. Real
+        // session report this closes: builders correctly staffed by the right settings but still
+        // occasionally picked independently per machine, drifting a rejoining player's own
+        // warehouses out of step with what they actually held.
 
         // ---- WHO GETS TO DECIDE WHO BUILDS WHAT --------------------------------------------
         //
@@ -1017,6 +1158,15 @@ namespace KaCMultiplayer
                     }
             }
 
+            // A backstop for the kingdom copies the host saves. They are normally refreshed right
+            // after each save, which is every season; this covers a session that somehow never
+            // autosaves, so the copies can never go stale without limit. See Net/KingdomMirror.cs.
+            if (FixedUpdateInterval % 12000 == 0) KaCMultiplayer.Net.KingdomMirror.RequestFromEveryone();
+
+            // Guest side: send ours once, soon after the world is up, so an early save or a quick
+            // departure is still recorded from our own kingdom rather than from the host's view.
+            if (FixedUpdateInterval % 600 == 0) KaCMultiplayer.Net.KingdomMirror.EnsureFirstCopy();
+
             // Keep streamer effects the same on every machine. Silent, and free, unless somebody
             // is actually running them. See Net/StreamerEffectSync.cs.
             KaCMultiplayer.Net.StreamerEffectSync.Tick();
@@ -1205,7 +1355,7 @@ namespace KaCMultiplayer
         /// Path.Combine and even File.ReadAllBytes were all refused as "illegal namespace reference
         /// to System.IO"), and one refusal fails the whole mod at launch.
         /// </summary>
-        public const string BuildVersion = "0.13.64";
+        public const string BuildVersion = "0.15.6";
 
         public static string ModVersion { get { return BuildVersion; } }
 
@@ -1270,10 +1420,23 @@ namespace KaCMultiplayer
             try { KaCMultiplayer.Net.ClockSync.Tick(); }
             catch (Exception e) { LogEx("clock sync", e); }
 
+            // Has this session reached the world yet. See PlayHasBegun for why the answer has to
+            // be remembered rather than asked for.
+            if (!PlayHasBegun && InMultiplayer
+                && GameState.inst != null && GameState.inst.IsPlayMode())
+            {
+                PlayHasBegun = true;
+                helper.Log("[net] play has begun; joiners now get the live world, not a map seed");
+            }
+
             // Here rather than in FixedUpdate: a joiner is sent the world while the host is PAUSED,
             // and FixedUpdate does not run while it is. Paced off unscaled time inside, so the rate
             // on the wire is the same as it was on the fixed tick.
             SaveTransfer.PumpOutgoing();
+
+            // A guest's own kingdom on its way to the host, paced the same way and for the same
+            // reason. See Net/KingdomMirror.cs.
+            KaCMultiplayer.Net.KingdomMirror.Pump();
 
             // The other half of the same job, on the receiving side: notice when the world has
             // stopped arriving and ask for what is missing. See SaveTransfer.CheckForStall.
@@ -1381,6 +1544,7 @@ namespace KaCMultiplayer
             KaCMultiplayer.Net.AiDiplomacy.Tick();
             KaCMultiplayer.Net.PlayerRelations.Tick();
             KaCMultiplayer.Lobby.AllianceRequestWindow.Tick();
+            KaCMultiplayer.Lobby.ResourcePicker.Tick();   // Escape closes it; was written, never called
 
             KaCMultiplayer.Lobby.DealRequestWindow.Tick();
 
@@ -3147,7 +3311,7 @@ namespace KaCMultiplayer
             /// WHY THAT ONE MISSING CHECK COSTS SO MUCH. This is the last call in
             /// LandmassOwner.SetBannerIdx, and there is real work after it: the loop that destroys
             /// and rebuilds UniMaterialsCracked, the materials every building picks from in
-            /// UpdateMaterialSelection. The throw skips all of it. Then it keeps going -- out of
+            /// UpdateMaterialSelection. The throw skips all of it. Then it keeps going: out of
             /// SetBannerIdx, out of Player.SetIndexedBanner, and out through
             /// PlayerSaveData.Unpack, which abandons the rest of that kingdom's restore. One army
             /// without a general is why a saved kingdom came back with no buildings, and why the
@@ -3642,6 +3806,8 @@ namespace KaCMultiplayer
         [HarmonyPatch(typeof(Player), "TrySettlePeople")]
         public class PlayerTrySettlePeopleForeignHook
         {
+            public static int SkippedForeign;
+
             /// <summary>
             /// Same gate as <see cref="PlayerUpdatePersonArrivalForeignHook"/>, for
             /// TrySettlePeople's other callers (TownSquare.TrySettleAttractedPeople runs on every
@@ -3672,6 +3838,7 @@ namespace KaCMultiplayer
                     {
                         numHoused = 0;
                         housingShortage = false;
+                        SkippedForeign++;
                         return false;
                     }
                 }
@@ -4964,32 +5131,42 @@ namespace KaCMultiplayer
             }
         }
 
-        // World hazards (wolf dens, witch huts) are host-authoritative. On clients the local
-        // spawn is suppressed; the host broadcasts each placement and clients mirror it. This
-        // keeps both players' maps identical. Existing hazards are sent to late joiners in
+        // World hazards are announced so that every machine ends up with the same set. Witch huts
+        // are placed during generation on the host's RNG and stay host-authoritative. Wolf dens are
+        // not: the only thing in the game that creates one is EmptyCave.Update, which turns a cave
+        // into a den when a keep is built within fifteen tiles of it, and in multiplayer that
+        // happens on whichever machine owns the keep. Existing hazards are sent to late joiners in
         // ClientConnected.
+        //
+        // THE CRASH THIS FIXES (player report, 0.15.2). A joining player's log filled with
+        // NullReferenceException at EmptyCave.Update. The suppression here used to return false on
+        // a guest, which leaves the patched method returning null, and the vanilla caller does this:
+        //
+        //     WolfDen den = World.inst.AddWolfDen(x, z);
+        //     for (int i = 0; i < SRand.Range(3, 5); i++) den.AddWolf();
+        //
+        // so it threw on every one of the guest's own caves. Worse than the log: the cave had
+        // already destroyed itself by then, so the guest was left with bare ground where a den
+        // should be and the host never heard about it at all. A guest now makes its own den and
+        // tells the host, which mirrors it and passes it on, so the den exists everywhere.
         [HarmonyPatch(typeof(World), "AddWolfDen")]
         public class AddWolfDenHook
         {
-            public static bool Prefix(int x, int z)
-            {
-                // Pure clients never spawn their own wolf dens; they get them from the host.
-                // Suppress local spawns on pure clients EXCEPT while loading a save, the save
-                // restores hazards by calling AddWitchHut/AddWolfDen, and suppressing those leaves
-                // a null hazard that crashes WitchHutSaveData.Unpack. During unpack, let them through.
-                if (NetClient.client.IsConnected && !NetHost.IsRunning && !Main.applyingWorldHazard
-                    && !LoadSaveOverrides.SessionSave.Unpacking)
-                    return false;
-                return true;
-            }
-
             public static void Postfix(int x, int z)
             {
-                if (NetHost.IsRunning && !Main.applyingWorldHazard)
+                // A den we are placing BECAUSE we were told about one is not news.
+                if (Main.applyingWorldHazard) return;
+                if (!NetClient.client.IsConnected) return;   // single-player, nothing to tell
+
+                var spawn = new KaCMultiplayer.Net.Messages.HazardSpawnMessage { X = x, Z = z, HazardType = 0 };
+                try
                 {
-                    try { KaCMultiplayer.Net.NetRouter.Broadcast(new KaCMultiplayer.Net.Messages.HazardSpawnMessage { X = x, Z = z, HazardType = 0 }, NetClient.client.Id); }
-                    catch (Exception e) { Main.helper.Log("AddWolfDen broadcast error: " + e.Message); }
+                    if (NetHost.IsRunning)
+                        KaCMultiplayer.Net.NetRouter.Broadcast(spawn, NetClient.client.Id);
+                    else
+                        KaCMultiplayer.Net.NetRouter.Send(spawn);
                 }
+                catch (Exception e) { Main.helper.Log("AddWolfDen announce error: " + e.Message); }
             }
         }
 
@@ -7913,6 +8090,29 @@ namespace KaCMultiplayer
             }
         }
 
+        /// <summary>
+        /// Tells everyone when the local player changes a tax rate.
+        ///
+        /// The rate lives on the Player object, so without this every other machine kept its copy
+        /// of our kingdom at 0: our homes were taxed wrong there, and the host saved 0 for us.
+        /// Only the local player's own changes are sent; applying someone else's rate also runs
+        /// SetTaxRate, on their Player, and must not echo.
+        /// </summary>
+        [HarmonyPatch(typeof(Player), "SetTaxRate")]
+        public class PlayerSetTaxRateHook
+        {
+            public static void Postfix(Player __instance, int landMass, float taxRate)
+            {
+                if (!NetClient.client.IsConnected || __instance == null || __instance != Player.inst) return;
+                if (landMass < 0) return;
+                try
+                {
+                    KaCMultiplayer.Net.NetRouter.Send(new KaCMultiplayer.Net.Messages.TaxRateMessage { LandMass = landMass, Rate = taxRate });
+                }
+                catch (Exception e) { Main.helper.Log("[TAX] broadcast error: " + e.Message); }
+            }
+        }
+
 
 
         // Make a launch-spawned ship carry the SAME guid on every machine, so ship-targeted packets
@@ -8299,6 +8499,87 @@ namespace KaCMultiplayer
                 catch (Exception e) { Main.helper.Log("[ARMY] despawn broadcast error: " + e.Message); }
             }
         }
+
+        /// <summary>
+        /// True when <paramref name="team"/> is another player's kingdom rather than ours, which
+        /// is the question every ownership gate in this file asks.
+        ///
+        /// Teams 0 to 4 are the game's own neutral and AI range: they tick the same way on every
+        /// machine by design and nothing here should touch them. Team 5 and up is a real human
+        /// kingdom, and exactly one machine is entitled to decide anything about it.
+        ///
+        /// "Ours" is Player.inst, which is the local kingdom everywhere except inside the two
+        /// deliberate swaps (SessionSave while packing, NetRegistrations while applying). Nothing
+        /// gated by this runs inside one of those windows.
+        /// </summary>
+        public static bool ForeignKingdomTeam(int team)
+        {
+            int localTeam = (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
+                ? Player.inst.PlayerLandmassOwner.teamId : int.MinValue;
+
+            return team >= 5 && team != localTeam;
+        }
+
+        // WHO DECIDES WHO MOVES IN, reported twice on 2026-09-20: after a reload the limit on how
+        // many people could move in appeared to come off, and homelessness never cleared again.
+        //
+        // Player.TrySettlePeople and Player.UpdatePersonArrival are the only two callers of
+        // Villager.SetHome in the whole game (read off the shipped IL, not assumed).
+        // UpdatePersonArrival is reached only from Player.Update, and PlayerPatch already
+        // suppresses Update on a remote kingdom's "Client Player" object, so that path is ours
+        // alone already and needs nothing.
+        //
+        // TrySettlePeople is the hole. TownSquare is a plain MonoBehaviour: its own Update runs on
+        // EVERY town square in the scene, whoever owns it, and calls TrySettleAttractedPeople. So
+        // this machine decides who moves into another player's houses, reading its own idea of
+        // which of their homes are free, and so does every other machine, at the same time.
+        //
+        // That race is both halves of the report. Several machines settle the same arrivals
+        // because each sees the same vacancy before anyone's SetHome has travelled, which looks
+        // like the cap coming off; and their lists of who lives where drift apart, which is a
+        // villager homeless on one screen and housed on another, permanently, since nothing
+        // reconciles them while the session is running.
+        //
+        // Gated the same way Barracks.Tick is: the kingdom's own machine decides and broadcasts,
+        // everyone else applies what arrives. The cheat key path (KeyboardControl.UpdateCheatKeys)
+        // goes through the same gate, which is right, it is the local player's own cheat.
+
+        // "IS THIS BUILDING MINE" HAD STOPPED MEANING ANYTHING. Vanilla's Building.IsPlayerBuilding
+        // is one line: World.GetLandmassOwner(GetCell().landMassIdx) == Player.inst.PlayerLandmassOwner.
+        //
+        // BuildingPlayerReferencePatch rewrites Player.inst inside every Building instance method
+        // to "this building's own owner", which is what tax, jobs and storage need and is exactly
+        // wrong here: the comparison turns into "does this building's owner own this building",
+        // which is true for every building in the world.
+        //
+        // PlayBuildingSound, TakeDamageInternal and Keep.SetAdvisorMessage all gate on it and
+        // trust it to mean "mine", so every player's construction noise, damage warning and
+        // advisor message became everyone's. Answered here from the ground the building stands on,
+        // and the rewritten body never runs.
+
+        // ONE KINGDOM'S NEWS IN EVERYBODY'S LOG. KingdomLog.TryLog is the single funnel behind
+        // every line the log panel shows, and it is called from inside whichever kingdom's
+        // simulation raised the event. Vanilla filters land owned by an AI, which in single player
+        // is the only thing worth filtering. Here every human kingdom's buildings tick on every
+        // machine, so "not AI" is true for all of them, and another player's fire, plague or
+        // unhappy peasants were announced in our log as though they were ours.
+        //
+        // A landmass of -1 is vanilla's own "this is not about one kingdom" case (weather and the
+        // like) and is left alone.
+
+        // PINK BOATS ON THE OTHER PLAYER'S SCREEN. ShipBase.UpdateMaterial paints every mesh with
+        // World.GetLandmassOwnerByTeamId(_teamID).UniMaterialFogClip and checks neither the owner
+        // nor the material. ShipBase.Init calls it the instant a ship is created, which on another
+        // machine can be before that kingdom's banner material exists, and Unity draws a null
+        // material hot pink.
+        //
+        // RepaintShipHulls already repaints on the next banner sweep, but a fishing boat is born
+        // and gone faster than the sweep comes round, so there is nearly always a fresh pink one
+        // somewhere, which reads as "their boats are pink" rather than "one boat was, briefly".
+        //
+        // Skipping the paint leaves the hull prefab's own material, an undyed boat rather than an
+        // obviously broken one, and asks for a sweep that will paint it for real. It also avoids
+        // the NRE vanilla would throw here for a ship whose team owns no landmass.
 
         [HarmonyPatch(typeof(Barracks), "Tick")]
         public class BarracksTickForeignHook
@@ -9374,6 +9655,24 @@ namespace KaCMultiplayer
             get { return NetClient.client.IsConnected || NetHost.IsRunning; }
         }
 
+        /// <summary>
+        /// True once this session has actually entered the running world, and it STAYS true while
+        /// somebody is sitting in the pause, save or load menu.
+        ///
+        /// <c>GameState.IsPlayMode()</c> answers a different question: "is the world on screen
+        /// right this second", which is false whenever a menu is open over it. Several session
+        /// decisions were asking it "has play begun", and got the wrong answer for a host who had
+        /// pressed Escape. A player rejoining at that moment was treated as though the session were
+        /// still in the lobby, so instead of the live world they were sent a bare map seed, which
+        /// regenerates the map and resets every kingdom on arrival: they restarted on a new map
+        /// while the host carried on with the real game.
+        ///
+        /// Latched in <c>Update</c> rather than set at each entry point, so every way into the
+        /// world is covered, including ones written later, and cleared with the rest of the session
+        /// state in <c>SteamLobby.ResetNetworkState</c>.
+        /// </summary>
+        public static bool PlayHasBegun;
+
         public static bool UseVanillaSaveFormat = true;   // Shipped default: new dictionary save format (vanilla-openable). Set false only to fall back to the old SessionSave path.
 
         // MakeSaveContainer, the runtime factory the save transpiler routed
@@ -9649,8 +9948,8 @@ namespace KaCMultiplayer
         ///
         /// THE SAME CRASH AS THE SHIP ONE ABOVE, from the other direction. Restoring a fishing hut
         /// runs OnBuildingPlacement, which calls ValidateDockPositions, which asks each dock cell
-        /// PathCell.GetBlocksWaterPath(cell, owner.teamId). That reads waterPathBlocked[teamId] --
-        /// a bool array sized for vanilla's five teams -- and our team ids start at 5. So a hut
+        /// PathCell.GetBlocksWaterPath(cell, owner.teamId). That reads waterPathBlocked[teamId],
+        /// a bool array sized for vanilla's five teams, and our team ids start at 5. So a hut
         /// belonging to a multiplayer kingdom indexes past the end of the array and takes the whole
         /// load down with it: "There was a problem loading this save file."
         ///
@@ -9665,7 +9964,7 @@ namespace KaCMultiplayer
         /// to be wrong anyway.
         ///
         /// GetBlocksWaterPath cannot be patched instead. It is nine bytes of IL, which is inside
-        /// Mono's inlining threshold, so a prefix on it would be dead code -- the same trap that
+        /// Mono's inlining threshold, so a prefix on it would be dead code. It is the same trap that
         /// IsCreativeModeOptionOn and GetJobEnabledFlags set for this project already.
         /// </summary>
         [HarmonyPatch(typeof(FishingHut), "ValidateDockPositions")]
@@ -9735,6 +10034,113 @@ namespace KaCMultiplayer
                 }
 
                 return false;
+            }
+        }
+
+        // ---- PATHS THE WORKER THREADS ABANDON ----------------------------------------------
+        //
+        // ThreadedPathing.CalculatePaths runs each path inside a bare catch, and the only line that
+        // marks a path Complete is the last one in the try. A path whose calculation throws is left
+        // at Status.Finding with nothing logged, and RequestPath refuses any path already Finding,
+        // so whoever asked (villager, army, ship, cart) never gets an answer and never asks again.
+        // In a session that is the "time runs, nobody moves" freeze.
+        //
+        // WaitForThread is the one place that sees every such path: it waits for all workers to
+        // finish the batch, then clears the batch. Right after that wait, with every worker parked,
+        // a path in the batch that is still Finding can only be one a worker gave up on. It is
+        // closed there as "no route", the answer the game already gives an unreachable target, so
+        // the asker's own logic moves on and asks again. Every unit type, one place, no polling.
+
+        /// <summary>Paths closed after a worker abandoned them, for the log and the suite.</summary>
+        public static int AbandonedPathsClosed;
+
+        /// <summary>How many WaitForThread call sites got the sweep, so a check can see it took.</summary>
+        public static int AbandonedPathSweepInstalled;
+
+        private static FieldInfo pathsToCalculateField;
+        private static FieldInfo requestedPathsField;
+
+        /// <summary>
+        /// Closes every path in the finished batch that a worker thread abandoned mid-calculation.
+        /// Called from inside ThreadedPathing.WaitForThread, after the workers have finished. See the
+        /// note above for why this is the multiplayer villager freeze. Single player: untouched.
+        /// </summary>
+        public static void CloseAbandonedPaths(ThreadedPathing pathing)
+        {
+            if (!InMultiplayer || pathing == null) return;
+
+            try
+            {
+                if (pathsToCalculateField == null)
+                    pathsToCalculateField = AccessTools.Field(typeof(ThreadedPathing), "pathsToCalculate");
+
+                ArrayExt<GamePath>[] batches = pathsToCalculateField.GetValue(pathing) as ArrayExt<GamePath>[];
+                if (batches == null) return;
+
+                // A path finished in this batch can be consumed and asked for AGAIN before this
+                // runs, which puts it back at Finding with a live request in requestedPaths. That
+                // one is waiting for the next batch, not abandoned, and must be left alone.
+                if (requestedPathsField == null)
+                    requestedPathsField = AccessTools.Field(typeof(ThreadedPathing), "requestedPaths");
+                ArrayExt<GamePath> queued = requestedPathsField.GetValue(pathing) as ArrayExt<GamePath>;
+
+                for (int w = 0; w < batches.Length; w++)
+                {
+                    ArrayExt<GamePath> batch = batches[w];
+                    if (batch == null) continue;
+
+                    for (int i = 0; i < batch.Count; i++)
+                    {
+                        GamePath p = batch.data[i];
+                        if (p == null || p.status != GamePath.Status.Finding) continue;
+                        if (queued != null && queued.Contains(p)) continue;
+
+                        // A half-written result is worse than none, and lastGridID = -1 stops
+                        // RequestPath reusing it as a cached route next time.
+                        p.result.Clear();
+                        p.lastGridID = -1;
+                        p.status = GamePath.Status.Complete;
+
+                        // The throw itself is swallowed by the game, so this line is the only
+                        // trace of it. The first few say where, which is what finds the cause.
+                        if (++AbandonedPathsClosed <= 20)
+                            helper.Log($"[PATHS] a {p.pathType} path for team {p.teamId} from {p.start} to {p.end}"
+                                       + " was abandoned by its worker thread; closed as no route"
+                                       + (AbandonedPathsClosed == 20 ? " (further ones counted, not logged)" : ""));
+                    }
+                }
+            }
+            catch (Exception e) { LogEx("closing abandoned paths", e); }
+        }
+
+        /// <summary>
+        /// Inserts <see cref="CloseAbandonedPaths"/> right after WaitForThread's wait for the
+        /// workers, before the finished batch is cleared. Earlier would race the workers; later
+        /// and the batch is gone.
+        /// </summary>
+        [HarmonyPatch(typeof(ThreadedPathing), "WaitForThread")]
+        public class ThreadedPathingAbandonedPathsHook
+        {
+            static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+            {
+                MethodInfo sweep = typeof(Main).GetMethod("CloseAbandonedPaths");
+
+                foreach (CodeInstruction c in instructions)
+                {
+                    yield return c;
+
+                    MethodInfo target = c.operand as MethodInfo;
+                    if (AbandonedPathSweepInstalled == 0 && target != null && target.Name == "Wait"
+                        && target.DeclaringType != null && target.DeclaringType.Name == "Countdown")
+                    {
+                        yield return new CodeInstruction(OpCodes.Ldarg_0);
+                        yield return new CodeInstruction(OpCodes.Call, sweep);
+                        AbandonedPathSweepInstalled++;
+                    }
+                }
+
+                if (AbandonedPathSweepInstalled == 0)
+                    helper.Log("[PATHS] WaitForThread has no Countdown.Wait any more; abandoned paths are NOT swept");
             }
         }
 
@@ -10332,6 +10738,57 @@ namespace KaCMultiplayer
                         new CodeInstruction(OpCodes.Ldarg_0),
                         new CodeInstruction(OpCodes.Call, ownerOf),
                     }, "GetPlayerByBuilding");
+            }
+        }
+
+        /// <summary>
+        /// Inside some building components, <c>Player.inst</c> means the kingdom that owns the
+        /// building, not the local one.
+        ///
+        /// These are components next to a Building, not Buildings, so the rewrite above never
+        /// reached them (the same gap CalcMaxGold fell through). Before this, every house in the
+        /// world was taxed at the local player's rate and sent its residents to the local homeless
+        /// list, every farm counted the local player's windmills for its bonus, and a full
+        /// blacksmith in another kingdom set off the local player's advisor. Each of these types
+        /// keeps its Building in a field named <c>b</c>, so load that and map it to the owner.
+        ///
+        /// Left alone on purpose: Home.ShowOverlay (whether the LOCAL overlay covers the house) and
+        /// Field's wheat drawing (remote farms are drawn by the local player's field system, the
+        /// only one that ticks, since cloned players' Update is suppressed).
+        /// </summary>
+        [HarmonyPatch]
+        public class ComponentOwnerReferencePatch
+        {
+            /// <summary>Type to method names, or null for every instance method on it.</summary>
+            private static readonly Dictionary<Type, string[]> Targets = new Dictionary<Type, string[]>
+            {
+                { typeof(Home), null },
+                { typeof(Field), new[] { "Tick", "DeferredYield", "RefreshBonuses" } },
+                { typeof(ProducerBasePlural), new[] { "DoYield", "CheckProductionPipeline" } },
+            };
+
+            static IEnumerable<MethodBase> TargetMethods()
+            {
+                foreach (var t in Targets)
+                    foreach (MethodBase m in SingletonRewrite.InstanceMethodsOf(t.Key, t.Key.Name + " owner transpiler"))
+                    {
+                        if (t.Value == null ? m.Name == "ShowOverlay" : !t.Value.Contains(m.Name)) continue;
+                        yield return m;
+                    }
+            }
+
+            static IEnumerable<CodeInstruction> Transpiler(MethodBase method, IEnumerable<CodeInstruction> instructions)
+            {
+                FieldInfo building = AccessTools.Field(method.DeclaringType, "b");
+                MethodInfo ownerOf = typeof(Main).GetMethod("GetPlayerByBuilding", BindingFlags.Static | BindingFlags.Public);
+
+                return SingletonRewrite.Apply(method, instructions,
+                    () => new[]
+                    {
+                        new CodeInstruction(OpCodes.Ldarg_0),
+                        new CodeInstruction(OpCodes.Ldfld, building),
+                        new CodeInstruction(OpCodes.Call, ownerOf),
+                    }, "GetPlayerByBuilding(b)");
             }
         }
 

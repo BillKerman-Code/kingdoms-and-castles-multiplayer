@@ -25,6 +25,9 @@ namespace KaCMultiplayer.Net.Messages
         public int WorldRivers;
         public int PlacementType;
         public bool FogOfWar;
+        public bool SavedGame;
+        public int SavedYear;
+        public int SavedKingdoms;
         public int AiKingdomCount;
 
         // Always exactly LobbySettings.MaxAiKingdoms entries on the wire, used or not, so the
@@ -46,6 +49,9 @@ namespace KaCMultiplayer.Net.Messages
             m.AddInt(WorldRivers);
             m.AddInt(PlacementType);
             m.AddBool(FogOfWar);
+            m.AddBool(SavedGame);
+            m.AddInt(SavedYear);
+            m.AddInt(SavedKingdoms);
             m.AddInt(AiKingdomCount);
             for (int i = 0; i < LobbySettings.MaxAiKingdoms; i++)
             {
@@ -68,6 +74,9 @@ namespace KaCMultiplayer.Net.Messages
             WorldRivers = m.GetInt();
             PlacementType = m.GetInt();
             FogOfWar = m.GetBool();
+            SavedGame = m.GetBool();
+            SavedYear = m.GetInt();
+            SavedKingdoms = m.GetInt();
             AiKingdomCount = m.GetInt();
             for (int i = 0; i < LobbySettings.MaxAiKingdoms; i++)
             {
@@ -96,6 +105,9 @@ namespace KaCMultiplayer.Net.Messages
                 WorldRivers = (int)s.WorldRivers,
                 PlacementType = s.PlacementType,
                 FogOfWar = s.FogOfWar,
+                SavedGame = s.SavedGame,
+                SavedYear = s.SavedYear,
+                SavedKingdoms = s.SavedKingdoms,
                 AiKingdomCount = s.AiKingdomCount
             };
             System.Array.Copy(s.AiDifficulties, msg.AiDifficulties, LobbySettings.MaxAiKingdoms);
@@ -118,6 +130,9 @@ namespace KaCMultiplayer.Net.Messages
             s.WorldRivers = (World.MapRiverLakes)WorldRivers;
             s.PlacementType = PlacementType;
             s.FogOfWar = FogOfWar;
+            s.SavedGame = SavedGame;
+            s.SavedYear = SavedYear;
+            s.SavedKingdoms = SavedKingdoms;
             s.AiKingdomCount = AiKingdomCount;
             System.Array.Copy(AiDifficulties, s.AiDifficulties, LobbySettings.MaxAiKingdoms);
             System.Array.Copy(AiCodes, s.AiCodes, LobbySettings.MaxAiKingdoms);

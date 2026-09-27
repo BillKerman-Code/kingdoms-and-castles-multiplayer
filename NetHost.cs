@@ -22,6 +22,12 @@ namespace KaCMultiplayer
             server.MessageReceived += KaCMultiplayer.Net.NetReceive.OnServer;
         }
 
+        /// <summary>
+        /// How long a connection may go quiet before it is hung up on. Set on both sides, see
+        /// StartServer for why the stock five seconds is too short for this game.
+        /// </summary>
+        public const int SessionTimeoutMs = 30000;
+
         public static void StartServer()
         {
             // Stop any previous server before creating a new one. The Steam transport
@@ -41,6 +47,16 @@ namespace KaCMultiplayer
             server.MessageReceived += KaCMultiplayer.Net.NetReceive.OnServer;
 
             server.Start(0, 25, useMessageHandlers: false);
+
+            // FIVE SECONDS IS NOT LONG ENOUGH FOR THIS GAME (player report, 0.15.2: players dropped
+            // mid-session with no reason given). Riptide's stock rule is to hang up on a connection
+            // it has not heard from in five seconds, and heartbeats go out once a second, so five
+            // missed in a row ends the session. Kingdoms and Castles stalls for longer than that on
+            // its own: an autosave on a large map, a season change, the world rebuild after a load.
+            // Nothing is actually wrong when that happens and the other player should still be there
+            // when the frame finally ends. Thirty seconds is long enough to ride out a stall and
+            // still short enough that a player who really has gone does not sit in the lobby.
+            server.TimeoutTime = SessionTimeoutMs;
 
             // Password gate. Setting HandleConnection makes Riptide hold every incoming connection as
             // "pending" until WE explicitly Accept or Reject it (so we MUST do one or the other, or the
@@ -80,12 +96,14 @@ namespace KaCMultiplayer
                     // theirs. LoadIdentity.IsLoadedSession stays true for the life of a loaded
                     // session, which is the question actually being asked here.
                     //
-                    // A game in progress counts too, even one that began as a fresh map: whoever is
-                    // connecting can only be a returning player, whose kingdom is in the world the
-                    // host is about to send, so naming a new one is the last thing they should do.
-                    LoadingSave = SteamLobby.loadingSave
+                    // Main.PlayHasBegun is the third case and it was missing: a fresh session that
+                    // has reached the world. Somebody rejoining one was told "fresh game" and sent
+                    // to found a second kingdom while the host was streaming them the live world.
+                    // Their kingdom is in that snapshot, so they wait for it instead, in the lobby,
+                    // where the transfer progress bar is.
+                    WorldComesFromHost = SteamLobby.loadingSave
                                || KaCMultiplayer.LoadSaveOverrides.LoadIdentity.IsLoadedSession
-                               || Main.GameInProgress,
+                               || Main.PlayHasBegun,
 
                     HostVersion = Main.ModVersion
                 }, ev.Client.Id);
@@ -102,6 +120,7 @@ namespace KaCMultiplayer
                     // and the send queue is shared: every one of those is taken out of the budget
                     // of the players still waiting for their own copy.
                     KaCMultiplayer.Net.SaveTransfer.Forget(ev.Client.Id);
+                    KaCMultiplayer.Net.KingdomMirror.Forget(ev.Client.Id);
 
                     // NetPlayers.ById returns null for an unknown client instead of throwing, so
                     // a messy disconnect no longer needs a swallowing try/catch here.
@@ -150,7 +169,10 @@ namespace KaCMultiplayer
                         Main.helper.Log($"[DISCONNECT] {leavingName} left mid-game, keeping their kingdom as a ghost (record preserved for consistency/reconnect).");
                     }
 
-                    LobbyView.RemovePlayer(ev.Client.Id);
+                    // Guests are told too, or their lists keep showing the player as here.
+                    // A leaver who owns a kingdom stays listed as a ghost.
+                    LobbyView.SyncRows();
+                    KaCMultiplayer.Net.SessionHandlers.BroadcastRoster();
 
                     // Losing a player mid-game pauses everyone. Their kingdom stops ticking the moment
                     // they go (it sits as a ghost, see above), so an unpaused world just keeps running

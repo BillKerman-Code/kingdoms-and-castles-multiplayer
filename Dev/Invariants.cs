@@ -1,0 +1,1538 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Reflection;
+using UnityEngine;
+
+using Riptide;
+using KaCMultiplayer.Net;
+using KaCMultiplayer.Net.Messages;
+
+namespace KaCMultiplayer.Dev
+{
+    /// <summary>
+    /// Checks for the BUG CLASSES this project keeps producing, rather than for individual bugs.
+    ///
+    /// WHY THIS IS A SEPARATE FILE FROM AutoTest. Everything in AutoTest asks "does this feature
+    /// work": can a ship be built, does a catapult survive a save, does chat send. Every check
+    /// here asks a different kind of question, "is this whole SHAPE of mistake absent from the
+    /// world right now", and it asks it of every kingdom and every landmass rather than of one
+    /// fixture. That distinction is worth keeping visible, because the two rot in opposite ways: a
+    /// feature check rots when the feature changes, and a class check rots when we stop believing
+    /// the class is real.
+    ///
+    /// WHERE THE LIST CAME FROM. A community contributor's patch (Workshop item 3802324628) fixed
+    /// nine bugs in our 0.10.1, and what mattered more than the fixes was that six of them were
+    /// the SAME FOUR MISTAKES, made in places nobody had looked:
+    ///
+    ///   1. A per-landmass array sized before this machine had the map, and never grown. Found in
+    ///      the job tables and in the building registries. Nothing had checked the other nine
+    ///      structures Player sizes the same way, in the same method, from the same number.
+    ///      See <see cref="PerLandmassDataCoversTheWorld"/>.
+    ///
+    ///   2. Vanilla reading Player.inst from a type neither of our transpilers covers. Found in
+    ///      LandmassOwner.CalcMaxGold and in JobSystem.Update. The singleton rewrite covers
+    ///      Player's own instance methods and the owner rewrite covers Building's, so anything on
+    ///      a third type is unguarded and silently answers for the local kingdom. The offline half
+    ///      of this class is docs/singleton_audit.ps1, which enumerates the ones still unclaimed;
+    ///      the runtime half is <see cref="EveryKingdomCountsItsOwnTreasury"/> and
+    ///      <see cref="IslandsAreStaffedByTheirOwner"/>.
+    ///
+    ///   3. A throw that only ever reaches Player.log, inside a multicast delegate. One subscriber
+    ///      throwing stops every later subscriber, and Weather.OnSeasonChange has AutoSave early
+    ///      in its list and every farm in the game late in it. That is how a destroyed cave
+    ///      container stopped the entire seasonal economy for weeks while presenting itself as
+    ///      "there was a problem saving the level". See
+    ///      <see cref="SeasonChangeReachesItsLastSubscriber"/>, which is the most valuable check in
+    ///      this file: it fails for ANY future early subscriber that throws, not only that one.
+    ///
+    ///   4. State written by reflection instead of through the method that owns it, so the object
+    ///      ends up marked done without being commissioned. Found in ApplyBuildSnapshot writing
+    ///      Building.built. See <see cref="SnapshotCommissionsABuilding"/>.
+    ///
+    /// HOW THESE ARE WRITTEN, deliberately. Not one of them names a method that patch added. They
+    /// assert the OBSERVABLE state those fixes produce, so they pass whether we adopt his
+    /// implementation, write our own, or fix the cause somewhere else entirely. They therefore
+    /// FAIL against our current source, which is the point: they are the acceptance criteria for
+    /// the merge, not a record of it.
+    /// </summary>
+    public static class Invariants
+    {
+        private static Action<string, bool> check;
+        private static Action<string> log;
+
+        /// <summary>
+        /// Runs every class check against the session that is already up.
+        ///
+        /// Reporting is borrowed rather than reimplemented: AutoTest owns the pass count, the
+        /// failure list and the [SELFTEST] prefix, and a second copy of that bookkeeping would
+        /// drift and start summarising a different run than the one that happened.
+        /// </summary>
+        public static void RunAll(Action<string, bool> checkReporter, Action<string> logger)
+        {
+            check = checkReporter;
+            log = logger;
+
+            PerLandmassDataCoversTheWorld();
+            EveryBuildingIsFindableOnItsLandmass();
+            TeamIdsAreUniqueAndResolvable();
+            EveryKingdomRunsOnTheSameClock();
+            SeasonChangeReachesItsLastSubscriber();
+            SavePackLeavesNoFieldNull();
+            EveryKingdomCountsItsOwnTreasury();
+            IslandsAreStaffedByTheirOwner();
+            SnapshotCommissionsABuilding();
+            DragonIdsAreUnique();
+            TaxRatesReachTheirKingdom();
+            RosterKeepsKingdomObjects();
+            HomelessListsBelongToTheirKingdom();
+            HousingDecisionsBelongToTheOwner();
+            EvictionsGoToTheHouseOwner();
+            AbandonedPathsAreClosed();
+            BuildingJobsAreRegistered("in the running session");
+            RecycledPendingMessagesDropTheirOldEvents();
+
+            // Last, deliberately: if the guard it checks is ever missing, the act of checking
+            // rebuilds the world this suite is running in, and every check after it would fail for
+            // a reason that has nothing to do with what it tests.
+            APlayedWorldIsNeverRegenerated();
+        }
+
+        // ---- CLASS 1: A PER-LANDMASS ARRAY SIZED BEFORE THE MAP EXISTED -------------------
+
+        /// <summary>
+        /// Every per-landmass structure on Player, named once, so the whole class is checked
+        /// instead of the two instances somebody happened to find.
+        ///
+        /// All of these are allocated together in <c>Player.ResetPerLandMassData</c> from
+        /// <c>World.NumLandMasses</c>. In a session a kingdom object can be built during the
+        /// handshake, which on a joining machine is BEFORE the map is generated, so every one of
+        /// them gets cut to the menu world's landmass count and nothing in the game ever grows
+        /// them again. Two were found short in the wild and cost a peer's farms (unstaffed
+        /// forever, because a table too short to cover an island makes the job lookup fall back to
+        /// the local player) and a host's keep (owned but in no registry, so invisible to every
+        /// lookup that matters). The other nine were never checked.
+        ///
+        /// Strings rather than typed accessors on purpose: four of these fields are private, their
+        /// element types are a mix of jagged arrays, ArrayExt and List, and the only property any
+        /// of them share is a row count. A twelfth structure is one line here.
+        /// </summary>
+        private static readonly string[] PerLandmassFields =
+        {
+            "JobPriorityOrder",
+            "JobEnabledFlag",
+            "JobCustomMaxEnabledFlag",
+            "JobFilledAvailable",
+            "ResidentialsPerLandmass",
+            "landMassBuildingRegistry",
+            "unbuiltBuildingsPerLandmass",
+            "landMassHappiness",
+            "landMassHealth",
+            "landMassIntegrity",
+            "CanUseTools",
+        };
+
+        private static void PerLandmassDataCoversTheWorld()
+        {
+            try
+            {
+                int need = (World.inst != null) ? World.inst.NumLandMasses : -1;
+                if (need <= 0) { check("the world reports a landmass count", false); return; }
+
+                List<string> tooShort = new List<string>();
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    if (kp == null || kp.inst == null) continue;
+
+                    for (int i = 0; i < PerLandmassFields.Length; i++)
+                    {
+                        string name = PerLandmassFields[i];
+                        int rows = RowCount(ReadField(kp.inst, name));
+
+                        // Absent is a different fault from short and worth distinguishing: a
+                        // kingdom that was never Reset at all has nothing to grow, and would be
+                        // misdiagnosed as a sizing problem.
+                        if (rows < 0) { tooShort.Add(kp.name + "." + name + "=absent"); continue; }
+                        if (rows < need) tooShort.Add(kp.name + "." + name + "=" + rows);
+                    }
+                }
+
+                // Named in the log, not merely counted. "three arrays are short" sends you
+                // reading; "Polyton.landMassHealth=0" sends you to the line.
+                if (tooShort.Count > 0)
+                    log("per-landmass data short of the world's " + need + " landmass(es): "
+                        + string.Join(", ", tooShort.ToArray()));
+
+                check("every kingdom's per-landmass data covers the whole world", tooShort.Count == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the per-landmass data check finished without throwing", false);
+                Main.LogEx("[SELFTEST] per-landmass coverage", ex);
+            }
+        }
+
+        /// <summary>
+        /// Every building a kingdom owns can also be FOUND through the per-landmass registry that
+        /// the rest of the game looks it up in.
+        ///
+        /// This is the direct consequence of a short registry, and the strongest candidate for the
+        /// Workshop report "if I place a castle as the host, it disappears". A building whose
+        /// landmass index is past the end of the array gets added to <c>Player.Buildings</c> and to
+        /// no per-landmass registry at all, so it exists, is owned, and is invisible to
+        /// <c>GetBuildingListForLandMass</c>, which is what the build menu, the treasury and the
+        /// job system all ask.
+        ///
+        /// The keep is called out separately because that is the one a player notices in seconds.
+        /// </summary>
+        private static void EveryBuildingIsFindableOnItsLandmass()
+        {
+            try
+            {
+                int orphans = 0;
+                int keepsLost = 0;
+                List<string> sample = new List<string>();
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    Player p = (kp != null) ? kp.inst : null;
+                    if (p == null || p.Buildings == null) continue;
+
+                    Guid keepGuid = Guid.Empty;
+                    if (p.keep != null)
+                    {
+                        Building kb = p.keep.GetComponent<Building>();
+                        if (kb != null) keepGuid = kb.guid;
+                    }
+
+                    // Bounded by Count, never data.Length: the backing array is longer and its
+                    // unfilled capacity is null. This is the recurring loop bug of this codebase.
+                    for (int i = 0; i < p.Buildings.Count; i++)
+                    {
+                        Building b = p.Buildings.data[i];
+                        if (b == null) continue;
+
+                        int lm = b.LandMass();
+                        if (lm < 0) continue;   // not on a landmass yet, nothing to be missing from
+
+                        if (FoundOnLandmass(p, b, lm)) continue;
+
+                        orphans++;
+                        if (b.guid == keepGuid) keepsLost++;
+                        if (sample.Count < 5)
+                            sample.Add(kp.name + "'s " + b.UniqueName + " on landmass " + lm);
+                    }
+                }
+
+                if (orphans > 0)
+                    log("buildings owned but in no per-landmass registry: " + orphans
+                        + " (" + string.Join(", ", sample.ToArray()) + ")");
+
+                check("every owned building is findable on its own landmass", orphans == 0);
+                check("no kingdom's keep has fallen out of its landmass registry", keepsLost == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the building registry check finished without throwing", false);
+                Main.LogEx("[SELFTEST] building registry coverage", ex);
+            }
+        }
+
+        /// <summary>Asks the registry the way the game does, by landmass and name hash.</summary>
+        private static bool FoundOnLandmass(Player p, Building b, int landMass)
+        {
+            ArrayExt<Building> list = p.GetBuildingListForLandMass(landMass, b.uniqueNameHash);
+            if (list == null) return false;
+
+            for (int i = 0; i < list.Count; i++)
+                if (list.data[i] == b) return true;
+
+            return false;
+        }
+
+        // ---- CLASS 3: A THROW INSIDE A MULTICAST DELEGATE ---------------------------------
+
+        /// <summary>
+        /// The season change reaches the LAST thing subscribed to it.
+        ///
+        /// This is the check that would have caught the worst bug in the project's history inside
+        /// one run, and it is worth understanding why it is shaped the way it is.
+        ///
+        /// <c>Weather.OnSeasonChange</c> is a .NET multicast delegate, and a multicast delegate
+        /// stops dispatching at the first subscriber that throws. <c>AutoSave.OnOnSeasonChange</c>
+        /// subscribes early; every farm's <c>YieldProducerSeason.Inst_OnSeasonChange</c>
+        /// subscribes late. So when a destroyed cave container made <c>WorldSaveData.Pack</c>
+        /// throw, no farm in the game ever received a season change again: crops grew taller every
+        /// year and nothing was ever harvested, on farms that were built, Open and fully staffed.
+        /// The only trace was one line in Player.log, which we were not reading, and a dialog that
+        /// said the level could not be saved.
+        ///
+        /// So this does NOT check the cave container. It subscribes its own probe, which is
+        /// therefore last in the invocation list, fires the real delegate, and asks whether the
+        /// probe ran. Any future early subscriber that throws for any reason fails this check, and
+        /// the exception is caught here with its full inner chain, which names the culprit
+        /// outright. That is the whole difference between fixing a bug and closing a class of them.
+        ///
+        /// Fired through the delegate rather than by invoking subscribers one at a time: the bug IS
+        /// the dispatch, so a loop that called each handler in its own try block would pass
+        /// happily on exactly the world that is broken.
+        ///
+        /// The probe is removed in a finally. Leaving a test handler subscribed to a game event for
+        /// the rest of the session would be this very bug, introduced by its own check.
+        /// </summary>
+        private static void SeasonChangeReachesItsLastSubscriber()
+        {
+            if (Weather.inst == null)
+            {
+                check("the weather system exists to fire a season change", false);
+                return;
+            }
+
+            bool probeRan = false;
+            EventHandler<Weather.SeasonChangeArgs> probe = delegate { probeRan = true; };
+
+            int subscribers = -1;
+            try
+            {
+                Weather.inst.OnSeasonChange += probe;
+
+                Delegate chain = PrivateField.Get<Delegate>(Weather.inst, "OnSeasonChange");
+                subscribers = (chain != null) ? chain.GetInvocationList().Length : 0;
+
+                Weather.SeasonChangeArgs args = new Weather.SeasonChangeArgs();
+                args.season = Weather.inst.season;
+                args.year = (Player.inst != null) ? Player.inst.CurrYear : 0;
+
+                if (chain != null) chain.DynamicInvoke(new object[] { Weather.inst, args });
+            }
+            catch (Exception ex)
+            {
+                // The one line that would have found it. LogEx walks the inner chain, which
+                // matters here because DynamicInvoke wraps everything in a
+                // TargetInvocationException whose own message is the useless "exception has been
+                // thrown by the target of an invocation".
+                Main.LogEx("[SELFTEST] a season-change subscriber threw, which stops every LATER "
+                           + "subscriber including every farm in the game. THIS STACK IS THE CULPRIT", ex);
+            }
+            finally
+            {
+                try { Weather.inst.OnSeasonChange -= probe; }
+                catch (Exception ex) { Main.LogEx("[SELFTEST] removing the season probe", ex); }
+            }
+
+            log("season change dispatched to " + subscribers + " subscriber(s)");
+            check("a season change reaches the last thing subscribed to it", probeRan);
+
+            // The two pieces of global world state whose loss produced that silent throw. Checked
+            // AFTER the dispatch rather than before, because a subscriber destroying them is
+            // precisely the failure, and checking first would look straight past it.
+            check("the world still has its cave container",
+                  World.inst != null && World.inst.caveContainer != null);
+
+            try
+            {
+                new World.WorldSaveData().Pack(World.inst);
+                check("the world can still be packed for a save", true);
+            }
+            catch (Exception ex)
+            {
+                check("the world can still be packed for a save", false);
+                Main.LogEx("[SELFTEST] packing the world after a season change", ex);
+            }
+        }
+
+        // ---- CLASS 4: STATE WRITTEN BY REFLECTION INSTEAD OF BY ITS OWNER -----------------
+
+        /// <summary>
+        /// A building that a peer's snapshot says is finished ends up COMMISSIONED, not merely
+        /// marked finished.
+        ///
+        /// <c>CompleteBuild</c> is the only thing that sends OnBuilt, registers the building's
+        /// resource providers with FreeResourceManager, calls <c>Player.BuildingNowBuilt</c> (which
+        /// takes it off the landmass's unbuilt list and recalculates max storage), creates its
+        /// worker jobs and bakes its pathing. Writing <c>built = true</c> by reflection out of a
+        /// snapshot does none of that, and then makes it unrecoverable: our own idempotency guard
+        /// sees <c>IsBuilt()</c> already true and suppresses the local simulation's real completion
+        /// a moment later as a duplicate. On a farm that is a field with no HarvesterJob that
+        /// nobody can ever harvest.
+        ///
+        /// Three assertions, because only the first is obvious and the other two are what the bug
+        /// actually cost:
+        ///   built                   the snapshot was applied at all
+        ///   off the unbuilt list    BuildingNowBuilt ran, so the kingdom knows it is finished
+        ///   no skipped recompletes  the real completion was not suppressed as a duplicate
+        ///
+        /// The third is what makes this a class check rather than a regression test.
+        /// <c>SkippedRecompletes</c> was added to diagnose this and then never asserted on; a
+        /// second source of the same mistake anywhere in the mod moves it.
+        /// </summary>
+        private static void SnapshotCommissionsABuilding()
+        {
+            Building b = null;
+            Player owner = null;
+            try
+            {
+                // The farm is the PEER's and the snapshot comes from the peer's client id, because
+                // that is the only arrival the handler accepts: a snapshot from a client with no
+                // player is dropped before it touches anything. The first version of this check
+                // sent from client 0 about a local farm, so it measured that drop and nothing else.
+                SessionPlayer peer = FindAnyPeer();
+                if (peer == null || peer.inst == null || peer.inst.keep == null || World.inst == null)
+                {
+                    log("no peer keep to place a snapshot fixture beside, skipping");
+                    return;
+                }
+                owner = peer.inst;
+
+                int skippedBefore = Main.BuildingCompleteBuildHook.SkippedRecompletes;
+
+                // A farm on purpose. It is the building where an uncommissioned completion is
+                // worst (no HarvesterJob, so it is worked and never harvested) and it is the one
+                // the original report was about. Placed under construction, the state a peer's
+                // snapshot arrives into.
+                b = PlacePeerFixture(owner, "farm");
+                if (b == null) return;
+
+                if (b.IsBuilt())
+                {
+                    // Nothing to prove: the fixture finished on placement, so the snapshot would
+                    // not be what completed it. Said out loud rather than passing vacuously.
+                    log("the snapshot fixture was already built on placement, skipping");
+                    return;
+                }
+
+                // Captured from the building's own save data rather than field by field. A
+                // hand-written state would default Life to 0 and wreck the building the moment it
+                // was applied, and it would drift from BuildSnapshotMessage the first time a field
+                // is added to either.
+                BuildingState state = BuildingState.From(new Building.BuildingSaveData().Pack(b));
+                state.Built = true;
+
+                BuildSnapshotMessage m = new BuildSnapshotMessage();
+                m.Origin = peer.id;
+                m.State = state;
+                m.ResourceProgress = 0f;
+
+                using (NetApply.Scope())
+                    NetRegistrations.ApplyBuildSnapshot(m);
+
+                check("a snapshot marked built does finish the building", b.IsBuilt());
+                check("a building finished by a snapshot leaves the kingdom's unbuilt list",
+                      !IsOnTheUnbuiltList(owner, b));
+                check("finishing a building by snapshot does not suppress its real completion",
+                      Main.BuildingCompleteBuildHook.SkippedRecompletes == skippedBefore);
+            }
+            catch (Exception ex)
+            {
+                check("the snapshot commissioning check finished without throwing", false);
+                Main.LogEx("[SELFTEST] snapshot commissioning", ex);
+            }
+            finally
+            {
+                // The fixture is a real building in a real town. Left standing it would be counted
+                // by every later check, including the save round trip.
+                try
+                {
+                    RemovePeerFixture(owner, b);
+                }
+                catch (Exception ex) { Main.LogEx("[SELFTEST] clearing the snapshot fixture", ex); }
+            }
+        }
+
+        /// <summary>
+        /// Whether a kingdom still holds this building on one of its per-landmass unbuilt lists.
+        ///
+        /// Private on Player, hence the reflection, and worth reaching for: it is the one piece of
+        /// state that says whether <c>BuildingNowBuilt</c> ran, and a building that is built while
+        /// still on the unbuilt list is the exact signature of a completion that never happened.
+        /// </summary>
+        private static bool IsOnTheUnbuiltList(Player p, Building b)
+        {
+            ArrayExt<ArrayExt<Building>> perLandmass =
+                PrivateField.Get<ArrayExt<ArrayExt<Building>>>(p, "unbuiltBuildingsPerLandmass");
+            if (perLandmass == null) return false;
+
+            for (int lm = 0; lm < perLandmass.Count; lm++)
+            {
+                ArrayExt<Building> row = perLandmass.data[lm];
+                if (row == null) continue;
+
+                for (int i = 0; i < row.Count; i++)
+                    if (row.data[i] == b) return true;
+            }
+
+            return false;
+        }
+
+        // ---- CLASS 2: VANILLA READING Player.inst FROM AN UNGUARDED TYPE ------------------
+
+        /// <summary>
+        /// Every kingdom's treasury is computed from ITS OWN throne rooms.
+        ///
+        /// <c>LandmassOwner.CalcMaxGold</c> belongs to a LandmassOwner and then asks
+        /// <c>Player.inst</c> what that owner has built. Neither transpiler reaches it: the
+        /// singleton rewrite covers Player's own instance methods and the owner rewrite covers
+        /// Building's, and CalcMaxGold is on a third type. So computing a peer's capacity asked the
+        /// LOCAL player for throne rooms on the PEER's islands, found none, and returned zero.
+        ///
+        /// Zero capacity is not cosmetic. Gold capacity comes only from throne rooms, so the
+        /// kingdom cannot hold gold at all and <c>Gold</c> sits at 0 forever, which is what reached
+        /// a player as a merchant bug: <c>ResourceLineItemUI.ClampOrder</c> recomputes
+        /// <c>Gold / price</c> on every keystroke and writes the result back into the box, so every
+        /// number typed into a merchant order snapped straight back to 0.
+        ///
+        /// Asked of EVERY kingdom that owns a throne room rather than of the peer specifically, so
+        /// the same check covers three players as readily as two.
+        /// </summary>
+        private static void EveryKingdomCountsItsOwnTreasury()
+        {
+            try
+            {
+                int asked = 0;
+                List<string> starved = new List<string>();
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    Player p = (kp != null) ? kp.inst : null;
+                    if (p == null || p.PlayerLandmassOwner == null) continue;
+
+                    int thrones = CountThroneRooms(p);
+                    if (thrones == 0) continue;   // legitimately no capacity, nothing to assert
+
+                    asked++;
+                    p.PlayerLandmassOwner.CalcMaxGold();
+
+                    if (p.PlayerLandmassOwner.MaxGoldStorage <= 0)
+                        starved.Add(kp.name + " holds " + thrones + " throne room(s) and has no capacity");
+                }
+
+                if (starved.Count > 0)
+                    log("treasuries computed from the wrong kingdom: " + string.Join(", ", starved.ToArray()));
+
+                if (asked == 0)
+                {
+                    // Worth saying rather than reporting a silent pass. No throne room anywhere
+                    // means this ran against a world that cannot exhibit the bug, and a PASS line
+                    // would be a lie of omission.
+                    log("no kingdom owns a throne room, so the treasury check proved nothing;"
+                        + " build one on each side before trusting this line");
+                    return;
+                }
+
+                check("every kingdom with a throne room can hold gold", starved.Count == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the treasury check finished without throwing", false);
+                Main.LogEx("[SELFTEST] treasury ownership", ex);
+            }
+        }
+
+        private static int CountThroneRooms(Player p)
+        {
+            if (p.Buildings == null) return 0;
+
+            int n = 0;
+            for (int i = 0; i < p.Buildings.Count; i++)
+            {
+                Building b = p.Buildings.data[i];
+                if (b == null) continue;
+
+                if (b.uniqueNameHash == World.throneRoomHash
+                    || b.uniqueNameHash == World.largeThroneRoomHash) n++;
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// An island is staffed by the rules of the kingdom that OWNS it.
+        ///
+        /// <c>JobSystem.Update</c> is the game's job-assignment engine and it reads the
+        /// <c>Player.inst</c> singleton sixteen times, walking every landmass in the world and
+        /// asking the local kingdom for each one's job priority order and enabled flags. Neither
+        /// transpiler covers JobSystem either. So every island in the world was staffed according
+        /// to the local player's decrees, other players' islands included: their farms, their
+        /// barracks and their quarries hired and fired by somebody else's settings, independently
+        /// on every machine.
+        ///
+        /// Tested through the accessors the engine actually calls, with the two kingdoms set to
+        /// DISAGREE. Asking whether the peer's own table is intact would pass on the broken build,
+        /// because the table was always fine; it was simply never consulted.
+        ///
+        /// Restored in a finally, since this deliberately turns a job category off mid-session.
+        /// </summary>
+        private static void IslandsAreStaffedByTheirOwner()
+        {
+            SessionPlayer peer = FindAnyPeer();
+            if (peer == null || peer.inst == null || peer.inst.PlayerLandmassOwner == null)
+            {
+                log("no peer kingdom in this session, skipping the island staffing check");
+                return;
+            }
+
+            Player owner = peer.inst;
+            int landMass = FirstOwnedLandmass(owner.PlayerLandmassOwner);
+            if (landMass < 0)
+            {
+                log("the peer owns no landmass, skipping the island staffing check");
+                return;
+            }
+
+            // The short-table fault this check sits beside would make the rows unreachable, and a
+            // NullReference here would be reported as "the check threw" rather than as the two
+            // separate faults they are.
+            if (!HasJobRow(owner, landMass) || !HasJobRow(Player.inst, landMass))
+            {
+                check("both kingdoms have a job row for landmass " + landMass, false);
+                return;
+            }
+
+            bool peerHad = owner.JobEnabledFlag[landMass][0];
+            bool localHad = Player.inst.JobEnabledFlag[landMass][0];
+            try
+            {
+                // Made to disagree, so the answer can only have come from one of them.
+                owner.JobEnabledFlag[landMass][0] = false;
+                Player.inst.JobEnabledFlag[landMass][0] = true;
+
+                // Asked through the helper JobSystem.Update now calls. Calling
+                // Player.GetJobEnabledFlags here would test nothing: Mono inlines it, which is
+                // exactly how the old accessor hooks passed review and never ran.
+                bool[] answered = Main.JobEnabledFlagsFor(Player.inst, landMass);
+
+                check("a peer's island is staffed by the peer's job settings, not ours",
+                      answered != null && answered.Length > 0 && answered[0] == false);
+                check("the job engine's table lookups are routed to the island's owner",
+                      Main.JobSystemOwnerTablesHook.Rewritten >= 2);
+            }
+            catch (Exception ex)
+            {
+                check("the island staffing check finished without throwing", false);
+                Main.LogEx("[SELFTEST] island staffing", ex);
+            }
+            finally
+            {
+                try
+                {
+                    owner.JobEnabledFlag[landMass][0] = peerHad;
+                    Player.inst.JobEnabledFlag[landMass][0] = localHad;
+                }
+                catch (Exception ex) { Main.LogEx("[SELFTEST] restoring job flags", ex); }
+            }
+        }
+
+        private static bool HasJobRow(Player p, int landMass)
+        {
+            return p != null
+                && p.JobEnabledFlag != null
+                && landMass < p.JobEnabledFlag.Length
+                && p.JobEnabledFlag[landMass] != null
+                && p.JobEnabledFlag[landMass].Length > 0;
+        }
+
+        private static int FirstOwnedLandmass(LandmassOwner owner)
+        {
+            if (owner == null || owner.ownedLandMasses == null || owner.ownedLandMasses.Count == 0)
+                return -1;
+
+            return owner.ownedLandMasses.data[0];
+        }
+
+        // ---- IDENTITY AND CLOCK ----------------------------------------------------------
+
+        /// <summary>
+        /// No two kingdoms share a team id, and every team id resolves back to its kingdom.
+        ///
+        /// A collision is invisible until it is catastrophic. Team id is what every relation, every
+        /// combat arbitration and every ownership test is keyed on, so two kingdoms on one id means
+        /// two players who cannot be at war, cannot own separate ground, and take each other's
+        /// buildings. The way it happens is a handshake deriving an id from the fresh-game formula
+        /// (clientId + 4) while a save carries a different one, and with exactly two players the
+        /// formula lands on 6 and happens to agree, which is why it survived every two-player test
+        /// this project ever ran.
+        ///
+        /// The reverse lookup is checked too, because a kingdom whose id resolves to nothing is the
+        /// orphan-phantom case: the world holds their town while the game offers them a fresh
+        /// castle to found beside it.
+        /// </summary>
+        private static void TeamIdsAreUniqueAndResolvable()
+        {
+            try
+            {
+                Dictionary<int, string> seen = new Dictionary<int, string>();
+                List<string> clashes = new List<string>();
+                List<string> unresolvable = new List<string>();
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    if (kp == null || kp.inst == null || kp.inst.PlayerLandmassOwner == null) continue;
+
+                    int team = kp.inst.PlayerLandmassOwner.teamId;
+
+                    string other;
+                    if (seen.TryGetValue(team, out other))
+                        clashes.Add("team " + team + " claimed by both " + other + " and " + kp.name);
+                    else
+                        seen[team] = kp.name;
+
+                    if (World.GetLandmassOwnerByTeamId(team) == null)
+                        unresolvable.Add(kp.name + " is team " + team + ", which resolves to nothing");
+                }
+
+                if (clashes.Count > 0) log("team id collisions: " + string.Join(", ", clashes.ToArray()));
+                if (unresolvable.Count > 0) log("unresolvable teams: " + string.Join(", ", unresolvable.ToArray()));
+
+                check("no two kingdoms share a team id", clashes.Count == 0);
+                check("every kingdom's team id resolves back to a landmass owner", unresolvable.Count == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the team id check finished without throwing", false);
+                Main.LogEx("[SELFTEST] team ids", ex);
+            }
+        }
+
+        /// <summary>
+        /// Every kingdom runs on the same clock as the local one.
+        ///
+        /// <c>Player.timeScale</c> is per-kingdom, and a remote Player gets 1 straight from its
+        /// constructor with nothing ever syncing it. <c>Weather.Update</c> reads the LOCAL player's,
+        /// so a menu pause (which sets it to 0) stopped the calendar while a remote kingdom's
+        /// Update went on ticking the whole tickable world with a real delta: crops kept growing
+        /// toward a winter that never came.
+        ///
+        /// One comparison rather than a mechanism check, deliberately. Whatever the mechanism turns
+        /// out to be, kingdoms disagreeing about how fast time passes is the observable fault, and
+        /// this is true or false in one line.
+        /// </summary>
+        private static void EveryKingdomRunsOnTheSameClock()
+        {
+            try
+            {
+                if (Player.inst == null)
+                {
+                    check("there is a local kingdom to compare clocks against", false);
+                    return;
+                }
+
+                float local = Player.inst.timeScale;
+                List<string> drifting = new List<string>();
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    if (kp == null || kp.inst == null || kp.inst == Player.inst) continue;
+
+                    if (Mathf.Abs(kp.inst.timeScale - local) > 0.001f)
+                        drifting.Add(kp.name + " at " + kp.inst.timeScale);
+                }
+
+                if (drifting.Count > 0)
+                    log("kingdoms on a different clock from the local " + local + ": "
+                        + string.Join(", ", drifting.ToArray()));
+
+                check("every kingdom runs at the local kingdom's time scale", drifting.Count == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the clock check finished without throwing", false);
+                Main.LogEx("[SELFTEST] kingdom clocks", ex);
+            }
+        }
+
+        // ---- THE SAVE PACKER, CHECKED AGAINST THE TYPE IT FILLS --------------------------
+
+        /// <summary>
+        /// Fields our packer is allowed to leave empty, each with the reason. If this check fails
+        /// on a field you believe is meant to be null, add it here WITH that reason; do not widen
+        /// the rule, which is the only thing keeping the check honest.
+        /// </summary>
+        private static readonly HashSet<string> DeliberatelyEmpty = new HashSet<string>
+        {
+            // Cleared on purpose: a session does not carry research between saves, and restoring
+            // it would hand a loaded kingdom upgrades it never bought.
+            "upgrades",
+
+            // Null asks vanilla's Unpack for its normal creative defaults; PackKingdom only fills
+            // it for a creative-mode kingdom. An empty list would switch the survival rules off.
+            "cmoOptions",
+
+            // Legacy fields from older save formats. Vanilla's own Pack never writes them and its
+            // Unpack never reads them: it reads WorkersArray and the four *List fields instead.
+            "Workers",
+            "currProduction",
+            "lastProduction",
+            "currConsumption",
+            "lastConsumption",
+            "globalHappinessMods",
+            "resourcesPerLandmass",
+        };
+
+        /// <summary>
+        /// Our replacement save packer leaves no reference field of PlayerSaveData null.
+        ///
+        /// A dropped field is the quietest bug this mod can produce. <c>landMassHappiness</c>,
+        /// <c>landMassHealth</c> and <c>landMassIntegrity</c> are built together, one entry per
+        /// landmass, and vanilla's Unpack reads all three back. Our packer wrote two of them.
+        /// Nothing crashed, because Unpack guards the null and substitutes an EMPTY list, and empty
+        /// is the problem: the list is indexed by landmass everywhere else, so it is meant to come
+        /// back with one entry per landmass and instead comes back with none, and every read of it
+        /// after a load is an ArgumentOutOfRange waiting to happen. Into Player.log, naturally.
+        ///
+        /// Reflection over the type rather than a list of fields we remember to maintain, so a
+        /// field the GAME adds in an update is covered on the first run after it appears. That is
+        /// the difference between this and a golden file.
+        /// </summary>
+        private static void SavePackLeavesNoFieldNull()
+        {
+            try
+            {
+                if (Player.inst == null) { check("there is a kingdom to pack", false); return; }
+
+                Player.PlayerSaveData packed = new Player.PlayerSaveData().Pack(Player.inst);
+                if (packed == null) { check("the local kingdom packs into save data", false); return; }
+
+                List<string> nulls = new List<string>();
+                FieldInfo[] fields = typeof(Player.PlayerSaveData)
+                    .GetFields(BindingFlags.Instance | BindingFlags.Public);
+
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    FieldInfo f = fields[i];
+                    if (f.FieldType.IsValueType) continue;            // 0 and false are legitimate
+                    if (DeliberatelyEmpty.Contains(f.Name)) continue;
+
+                    if (f.GetValue(packed) == null) nulls.Add(f.Name);
+                }
+
+                if (nulls.Count > 0)
+                    log("save fields our packer leaves null: " + string.Join(", ", nulls.ToArray())
+                        + " (each comes back as an EMPTY collection on load, and anything that"
+                        + " indexes it by landmass then throws into Player.log)");
+
+                check("our save packer fills every reference field the game declares", nulls.Count == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the save packer completeness check finished without throwing", false);
+                Main.LogEx("[SELFTEST] save pack completeness", ex);
+            }
+        }
+
+        // ---- DRAGONS --------------------------------------------------------------------
+
+        /// <summary>
+        /// Every dragon in the world has a real id, and no id belongs to two dragons.
+        ///
+        /// Dragons are host-authoritative and are talked about across the wire purely by id, so an
+        /// empty or duplicated one means a message about one dragon lands on another or on none.
+        /// It is also what a missed spawn route looks like from the outside:
+        /// <c>DragonSpawn.OnSeasonChange</c> has four spawn branches and one of them
+        /// (<c>SpawnBabyDragonToVisit</c>) calls <c>Spawn</c> directly with no gate, so a client
+        /// could spawn a dragon of its own accord that existed on exactly one machine.
+        /// </summary>
+        private static void DragonIdsAreUnique()
+        {
+            try
+            {
+                if (DragonSpawn.inst == null || DragonSpawn.inst.currentDragons == null)
+                {
+                    log("no dragon system in this world, skipping");
+                    return;
+                }
+
+                var all = DragonSpawn.inst.currentDragons;
+                if (all.Count == 0) { log("no dragons airborne, nothing to check"); return; }
+
+                HashSet<Guid> ids = new HashSet<Guid>();
+                int empty = 0, duplicate = 0;
+
+                for (int i = 0; i < all.Count; i++)
+                {
+                    Dragon d = all.data[i];
+                    if (d == null) continue;
+
+                    if (d.id == Guid.Empty) { empty++; continue; }
+                    if (!ids.Add(d.id)) duplicate++;
+                }
+
+                check("every dragon has an id", empty == 0);
+                check("no two dragons share an id", duplicate == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the dragon id check finished without throwing", false);
+                Main.LogEx("[SELFTEST] dragon ids", ex);
+            }
+        }
+
+        // ---- HOUSING --------------------------------------------------------------------
+
+        /// <summary>
+        /// No kingdom's homeless list holds a villager who has a house, or somebody else's villager.
+        ///
+        /// Both happen when vanilla code that reads the local player runs for another kingdom, and
+        /// both are expensive: the homelessness penalty counts villagers with no house, and only a
+        /// kingdom's own machine re-houses the people on its own list, so a villager filed under the
+        /// wrong kingdom is homeless for the rest of the session. This is the runtime half of the
+        /// save repair in SessionSave.RepairHousing.
+        /// </summary>
+        private static void HomelessListsBelongToTheirKingdom()
+        {
+            try
+            {
+                int housed = 0, foreign = 0, dead = 0;
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    Player p = (kp == null) ? null : kp.inst;
+                    if (p == null || p.Workers == null || p.Homeless == null) continue;
+
+                    HashSet<Villager> ours = new HashSet<Villager>();
+                    for (int i = 0; i < p.Workers.Count; i++)
+                    {
+                        Villager w = p.Workers.data[i];
+                        if (w == null) continue;
+
+                        ours.Add(w);
+
+                        // A villager killed on another machine whose death was applied to the wrong
+                        // kingdom stays here as a corpse, and goes on counting against happiness.
+                        if (IsShutDown(w)) dead++;
+                    }
+
+                    for (int i = 0; i < p.Homeless.Count; i++)
+                    {
+                        Villager v = p.Homeless.data[i];
+                        if (v == null) continue;
+
+                        if (!ours.Contains(v)) foreign++;
+                        else if (v.Residence != null) housed++;
+                    }
+                }
+
+                check("no kingdom lists a housed villager as homeless", housed == 0);
+                check("no kingdom lists another kingdom's villager as homeless", foreign == 0);
+                check("no kingdom still counts a dead villager among its workers", dead == 0);
+            }
+            catch (Exception ex)
+            {
+                check("the homeless list check finished without throwing", false);
+                Main.LogEx("[SELFTEST] homeless lists", ex);
+            }
+        }
+
+        /// <summary>
+        /// Only a kingdom's own machine decides who moves into its houses, and only its own
+        /// buildings answer "yes" to IsPlayerBuilding.
+        ///
+        /// TownSquare is a plain MonoBehaviour whose Update calls TrySettlePeople for every town
+        /// square in the scene, whoever owns it, so before the gate every machine housed every
+        /// kingdom's arrivals from its own view of which homes were free. Two machines settling
+        /// the same arrival is the "the cap came off" report, and their resident lists parting
+        /// company is the homelessness that never clears.
+        ///
+        /// Calls it directly for another kingdom and for our own. numToTry is 0 on our own call so
+        /// running the suite cannot actually move anybody in.
+        /// </summary>
+        private static void HousingDecisionsBelongToTheOwner()
+        {
+            try
+            {
+                if (!NetClient.client.IsConnected)
+                {
+                    log("[SELFTEST] not in a session, housing ownership not checked");
+                    return;
+                }
+
+                Player mine = Player.inst;
+                Player theirs = null;
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    Player p = (kp == null) ? null : kp.inst;
+                    if (p == null || p == mine || p.PlayerLandmassOwner == null) continue;
+                    if (!Main.ForeignKingdomTeam(p.PlayerLandmassOwner.teamId)) continue;
+
+                    theirs = p;
+                    break;
+                }
+
+                if (mine == null || theirs == null || mine.keep == null || theirs.keep == null)
+                {
+                    log("[SELFTEST] no second kingdom with a keep, housing ownership not checked");
+                    return;
+                }
+
+                Building ourKeep = mine.keep.GetComponent<Building>();
+                Building theirKeep = theirs.keep.GetComponent<Building>();
+                if (ourKeep == null || theirKeep == null)
+                {
+                    log("[SELFTEST] a keep has no Building, housing ownership not checked");
+                    return;
+                }
+
+                // Vanilla takes these by ref, not out, so they start life here.
+                int housed = 0;
+                bool shortage = false;
+
+                int before = Main.PlayerTrySettlePeopleForeignHook.SkippedForeign;
+                theirs.TrySettlePeople(theirKeep.LandMass(), 1, 0, ref housed, ref shortage);
+
+                check("another kingdom's housing decision is left to its owner",
+                      Main.PlayerTrySettlePeopleForeignHook.SkippedForeign == before + 1);
+                check("a skipped housing call reports nobody housed", housed == 0);
+
+                before = Main.PlayerTrySettlePeopleForeignHook.SkippedForeign;
+                mine.TrySettlePeople(ourKeep.LandMass(), 0, 0, ref housed, ref shortage);
+
+                check("our own housing decision still runs",
+                      Main.PlayerTrySettlePeopleForeignHook.SkippedForeign == before);
+
+                // The same question from the building's side. Before the gate this answered
+                // "whoever is simulating right now", which made every building in the world ours.
+                check("our own keep counts as one of our buildings", ourKeep.IsPlayerBuilding());
+                check("another kingdom's keep does not count as one of ours", !theirKeep.IsPlayerBuilding());
+            }
+            catch (Exception ex)
+            {
+                check("the housing ownership check finished without throwing", false);
+                Main.LogEx("[SELFTEST] housing ownership", ex);
+            }
+        }
+
+        /// <summary>
+        /// Places a building for another kingdom beside its keep, off the wire, or null (with the
+        /// reason logged) when the site refused it. Player.inst is aimed at the owner for the
+        /// placement, the discipline FakePeer uses for its own keep and dock, so the building lands
+        /// in the owner's registries the way a peer's building does on this machine.
+        /// </summary>
+        private static Building PlacePeerFixture(Player owner, string uniqueName)
+        {
+            Building keep = owner.keep.GetComponent<Building>();
+            if (keep == null) { log("the peer's keep has no Building component, skipping"); return null; }
+
+            Cell site = World.inst.GetCellDataClamped(keep.transform.position + new Vector3(4f, 0f, 0f));
+            if (site == null) { log("no site for a " + uniqueName + " fixture, skipping"); return null; }
+
+            Building b;
+            Player previous = Player.inst;
+            try
+            {
+                Player.inst = owner;
+                using (NetApply.Scope())
+                {
+                    b = UnityEngine.Object.Instantiate<Building>(GameState.inst.GetPlaceableByUniqueName(uniqueName));
+                    b.Init();
+                    b.transform.position = site.Position;
+                    b.SendMessage("OnPlayerPlacement", SendMessageOptions.DontRequireReceiver);
+                    World.inst.Place(b);
+                }
+            }
+            finally { Player.inst = previous; }
+
+            // Place does not promise to take the site. A refusal is an absent fixture, reported
+            // as such, not a failed invariant.
+            if (Main.FindBuildingByGuidAnywhere(b.guid) == null)
+            {
+                log("the " + uniqueName + " fixture did not take at " + site.Position + ", skipping");
+                return null;
+            }
+            return b;
+        }
+
+        /// <summary>Demolishes a fixture from <see cref="PlacePeerFixture"/>, as its owner and off the wire.</summary>
+        private static void RemovePeerFixture(Player owner, Building b)
+        {
+            if (b == null) return;
+
+            Player previous = Player.inst;
+            try
+            {
+                if (owner != null) Player.inst = owner;
+                using (NetApply.Scope()) World.inst.DemolishBuilding(b, false);
+            }
+            finally { Player.inst = previous; }
+        }
+
+        /// <summary>
+        /// A destroyed house's residents become homeless in the kingdom that OWNS the house.
+        ///
+        /// Vanilla's Home.OnDisableInternal files them under Player.inst, the local kingdom, so a
+        /// house burnt down on another player's island would put their people on our homeless
+        /// list, to be fed and housed by the wrong kingdom. ComponentOwnerReferencePatch rewrites
+        /// that read to the house's owner; this proves it by evicting one villager from a house on
+        /// the peer's island. The villager is put back where it lived afterwards.
+        /// </summary>
+        private static void EvictionsGoToTheHouseOwner()
+        {
+            Building b = null;
+            Player owner = null;
+            Villager v = null;
+            IResidence hadHome = null;
+            try
+            {
+                SessionPlayer peer = FindAnyPeer();
+                if (peer == null || peer.inst == null || peer.inst.keep == null || World.inst == null
+                    || Player.inst == null || Player.inst.Workers.Count == 0)
+                {
+                    log("no peer keep or no villager of ours, eviction ownership not checked");
+                    return;
+                }
+                owner = peer.inst;
+
+                b = PlacePeerFixture(owner, World.smallHouseName);
+                if (b == null) return;
+
+                Home home = b.GetComponent<Home>();
+                if (home == null) { log("the house fixture has no Home, eviction ownership not checked"); return; }
+
+                // Any villager will do as the resident: what is under test is which list the
+                // house files them in, and the house decides that, not the villager.
+                v = Player.inst.Workers.data[0];
+                hadHome = v.Residence;
+                bool wasOurHomeless = Player.inst.Homeless.Contains(v);
+
+                home.Residents.Add(v);
+                home.OnDisableInternal();
+
+                check("a destroyed house's residents become homeless in the house owner's kingdom",
+                      owner.Homeless.Contains(v));
+                check("another kingdom's eviction does not land on our homeless list",
+                      wasOurHomeless || !Player.inst.Homeless.Contains(v));
+            }
+            catch (Exception ex)
+            {
+                check("the eviction ownership check finished without throwing", false);
+                Main.LogEx("[SELFTEST] eviction ownership", ex);
+            }
+            finally
+            {
+                try
+                {
+                    if (v != null)
+                    {
+                        if (owner != null) owner.Homeless.RemoveSwap(v);
+                        v.Residence = hadHome;
+                    }
+                    RemovePeerFixture(owner, b);
+                }
+                catch (Exception ex) { Main.LogEx("[SELFTEST] clearing the eviction fixture", ex); }
+            }
+        }
+
+        /// <summary>
+        /// A path a pathing worker thread gave up on is closed, not left waiting forever.
+        ///
+        /// The game swallows any exception inside a path calculation and leaves that path marked
+        /// Finding, which it never asks about again: the unit just stands there.
+        /// Main.CloseAbandonedPaths runs inside WaitForThread once the workers are done and closes
+        /// such paths as "no route". Checked twice: that the sweep is really spliced into the game,
+        /// and that it closes a stuck path, driven on a ThreadedPathing of our own with no threads
+        /// so the live pathfinder is never touched.
+        /// </summary>
+        /// <summary>
+        /// A pending reliable message that has been acked and handed back out to a new message must
+        /// not still answer to the resend events queued against its previous life.
+        ///
+        /// THE CLASS: a pooled object resurrected by a stale event. Riptide guarded its resend
+        /// events by comparing a timestamp, and the timestamp is Peer.CurrentTime, which is read
+        /// once per Update, so every message sent in one frame carries the same one. Recycle an
+        /// instance within that frame and the old event matches the new use, resends it, and
+        /// schedules another event of its own. The instance then has two retry chains, then four,
+        /// and an ordinary stream of reliable messages becomes a send storm. It cost two players
+        /// their session in 0.15.2 and 0.15.3, presenting as the game crawling and then a kick with
+        /// no reason given.
+        ///
+        /// Checked through the token itself rather than by counting sends, because the fault is
+        /// precisely that an old event cannot tell it is old. If either the release or the reuse
+        /// stops moving the token, this fails.
+        /// </summary>
+        private static void RecycledPendingMessagesDropTheirOldEvents()
+        {
+            try
+            {
+                Connection conn = NetClient.client == null ? null : NetClient.client.Connection;
+                if (conn == null)
+                {
+                    log("[SELFTEST] no live connection, skipping the pending message check");
+                    return;
+                }
+
+                Message body = Message.Create(MessageSendMode.Reliable, (ushort)NetMessageId.TreeShake);
+                body.AddUShort(0).AddInt(0);
+
+                PendingMessage first = PendingMessage.Create(1, body, conn);
+                int staleToken = first.RetryToken;
+                first.Clear();                      // acked, back to the pool
+
+                PendingMessage reused = PendingMessage.Create(2, body, conn);
+                int liveToken = reused.RetryToken;
+
+                check("an acked pending message stops answering its own queued events",
+                      staleToken != liveToken);
+
+                // The pool hands the same instance straight back when it is the only one free, which
+                // is the case this is about. Logged rather than asserted: the pool is shared with the
+                // live session and may have others in it.
+                log("[SELFTEST] pending message reuse: same instance = "
+                    + object.ReferenceEquals(first, reused)
+                    + ", token " + staleToken + " -> " + liveToken);
+
+                reused.Clear();
+                check("releasing a pending message moves its token again",
+                      reused.RetryToken != liveToken);
+
+                body.Release();
+            }
+            catch (Exception ex)
+            {
+                check("the pending message check finished without throwing", false);
+                Main.LogEx("[SELFTEST] pending messages", ex);
+            }
+        }
+
+        // ---- CLASS 18: A WORLD SEED ARRIVING AFTER PLAY BEGAN ----------------------------
+
+        /// <summary>
+        /// A map seed must not rebuild a world that is being played in.
+        ///
+        /// Receiving one resets every kingdom and regenerates the map, which is right in the lobby
+        /// and ruinous afterwards. A player kicked from a year-30 session was sent one while
+        /// rejoining, because the host had a menu open and the code asked
+        /// <c>GameState.IsPlayMode()</c> whether a game was running: it reads false behind any menu,
+        /// so a live session looked like a lobby. That player restarted on a brand new map while the
+        /// host carried on with the real game.
+        ///
+        /// Checked by actually handing the client handler a seed and looking at what survives,
+        /// rather than by reading the flag: the flag is the fix, the world is the promise. The seed
+        /// used is deliberately not this world's, so a regeneration could not be mistaken for a
+        /// no-op.
+        /// </summary>
+        private static void APlayedWorldIsNeverRegenerated()
+        {
+            try
+            {
+                check("the session remembers that play has begun, whatever menu is open",
+                      Main.PlayHasBegun);
+
+                NetRegistry.Handler handler = NetRegistry.HandlerFor(NetMessageId.WorldSeed, false);
+                if (handler == null)
+                {
+                    check("the world seed message has a client handler", false);
+                    return;
+                }
+
+                int seedBefore = World.inst.seed;
+                int keepsBefore = 0;
+                foreach (SessionPlayer p in Main.kCPlayers.Values)
+                    if (p != null && p.inst != null && p.inst.keep != null) keepsBefore++;
+
+                handler(new WorldSeedMessage
+                {
+                    Seed = seedBefore + 1,
+                    MapBias = (int)World.inst.generatedMapsBias,
+                    MapSize = (int)World.inst.generatedMapSize,
+                    RiverLakes = (int)World.inst.generatedRiverLakes
+                }, new NetContext(0, false));
+
+                int keepsAfter = 0;
+                foreach (SessionPlayer p in Main.kCPlayers.Values)
+                    if (p != null && p.inst != null && p.inst.keep != null) keepsAfter++;
+
+                check("a map seed arriving mid-game leaves the map alone",
+                      World.inst.seed == seedBefore);
+                check("a map seed arriving mid-game leaves every kingdom standing",
+                      keepsAfter == keepsBefore);
+
+                log("[SELFTEST] mid-game world seed: seed " + seedBefore + " -> " + World.inst.seed
+                    + ", keeps " + keepsBefore + " -> " + keepsAfter);
+            }
+            catch (Exception ex)
+            {
+                check("the mid-game world seed check finished without throwing", false);
+                Main.LogEx("[SELFTEST] mid-game world seed", ex);
+            }
+        }
+
+        private static void AbandonedPathsAreClosed()
+        {
+            try
+            {
+                check("the pathing dispatcher sweeps paths its workers abandoned",
+                      Main.AbandonedPathSweepInstalled == 1);
+
+                GamePath stuck = new GamePath();
+                stuck.status = GamePath.Status.Finding;
+                stuck.result.Add(Vector3.one);   // a half-written route the throw left behind
+
+                // Finished in this batch, then consumed and asked for again: Finding, but queued
+                // for the next batch. Closing this one would hand a working unit "no route".
+                GamePath requeued = new GamePath();
+                requeued.status = GamePath.Status.Finding;
+
+                ArrayExt<GamePath> batch = new ArrayExt<GamePath>(4);
+                batch.Add(stuck);
+                batch.Add(requeued);
+
+                ThreadedPathing pathing = new ThreadedPathing();
+                PrivateField.Set(pathing, "pathsToCalculate", new ArrayExt<GamePath>[] { batch });
+                PrivateField.Get<ArrayExt<GamePath>>(pathing, "requestedPaths").Add(requeued);
+
+                int before = Main.AbandonedPathsClosed;
+                Main.CloseAbandonedPaths(pathing);
+
+                check("an abandoned path is closed as no route",
+                      stuck.status == GamePath.Status.Complete && stuck.result.Count == 0
+                      && Main.AbandonedPathsClosed == before + 1);
+                check("a path already asked for again is left for the next batch",
+                      requeued.status == GamePath.Status.Finding);
+            }
+            catch (Exception ex)
+            {
+                check("the abandoned path check finished without throwing", false);
+                Main.LogEx("[SELFTEST] abandoned paths", ex);
+            }
+        }
+
+
+        // ---- JOBS -----------------------------------------------------------------------
+
+        /// <summary>
+        /// Every job a building holds is also registered with the game's job system.
+        ///
+        /// A building keeps its jobs in its own list, and villagers only ever find work through
+        /// JobSystem. <c>Player.Reset</c> calls the GLOBAL <c>JobSystem.ClearAllJobs</c>, which
+        /// empties the job system for every kingdom but leaves each building's own list full. A
+        /// construction site in that state never gets another builder, because
+        /// <c>TryAddBuilderJobs</c> only adds jobs while the list is short, and a workplace never
+        /// gets another worker. Reset runs whenever a remote kingdom object is built, which is how
+        /// a join or rejoin reached everybody else's buildings: the "builders forget to finish
+        /// after a rejoin" report, whose workaround was deleting the site so it made fresh jobs.
+        ///
+        /// Called twice, while the session runs and again after the save loads back.
+        /// </summary>
+        internal static void BuildingJobsAreRegistered(string when)
+        {
+            try
+            {
+                HashSet<Job> registered = new HashSet<Job>();
+                var jobs = JobSystem.inst.jobs;
+                for (int lm = 0; lm < jobs.Count; lm++)
+                    for (int category = 0; category < jobs.data[lm].Count; category++)
+                        foreach (Job j in jobs.data[lm].data[category]) registered.Add(j);
+
+                int held = 0, orphaned = 0;
+                Dictionary<string, int> byType = new Dictionary<string, int>();
+
+                foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                {
+                    Player p = (kp == null) ? null : kp.inst;
+                    if (p == null || p.Buildings == null) continue;
+
+                    for (int i = 0; i < p.Buildings.Count; i++)
+                    {
+                        Building b = p.Buildings.data[i];
+                        if (b == null || b.jobs == null) continue;
+
+                        foreach (Job j in b.jobs)
+                        {
+                            held++;
+                            if (registered.Contains(j)) continue;
+
+                            orphaned++;
+                            string name = j.GetType().Name;
+                            int n;
+                            byType.TryGetValue(name, out n);
+                            byType[name] = n + 1;
+                        }
+                    }
+                }
+
+                if (orphaned > 0)
+                {
+                    List<string> parts = new List<string>();
+                    foreach (var kv in byType) parts.Add(kv.Key + " x" + kv.Value);
+                    log("building jobs missing from the job system " + when + ": " + string.Join(", ", parts.ToArray()));
+                }
+                log("building jobs " + when + ": " + held + " held, " + orphaned + " not registered"
+                    + " (reset rewrite count " + Main.PlayerResetJobsHook.Rewritten + ")");
+
+                check("every building job is registered with the job system " + when, orphaned == 0);
+                check("resetting a remote kingdom leaves the job system alone " + when,
+                      Main.PlayerResetJobsHook.Rewritten >= 1 && Main.PlayerResetJobListHook.Rewritten >= 1);
+            }
+            catch (Exception ex)
+            {
+                check("the building job check finished without throwing " + when, false);
+                Main.LogEx("[SELFTEST] building jobs", ex);
+            }
+        }
+
+
+        // ---- ROSTER ---------------------------------------------------------------------
+
+        /// <summary>
+        /// A roster message updates the player registry in place.
+        ///
+        /// It used to wipe the registry and build every remote player again, with a new, empty
+        /// Player object, so the kingdoms a guest had already unpacked lost their owner whenever
+        /// someone else joined. Sends the current roster back through the real handler and checks
+        /// every kingdom object survived, then that the ghost flag travels.
+        /// </summary>
+        private static void RosterKeepsKingdomObjects()
+        {
+            try
+            {
+                SessionPlayer peer = FindAnyPeer();
+                if (peer == null) { log("no peer kingdom, skipping the roster check"); return; }
+
+                Dictionary<string, Player> before = new Dictionary<string, Player>();
+                foreach (var kv in Main.kCPlayers) before[kv.Key] = kv.Value.inst;
+
+                PeerRosterMessage roster = new PeerRosterMessage();
+                foreach (SessionPlayer p in Main.kCPlayers.Values)
+                    roster.Players.Add(new PeerRosterMessage.Entry
+                    {
+                        ClientId = p.id, SteamId = p.steamId, Name = p.name, KingdomName = p.kingdomName,
+                        Banner = p.banner, Ready = p.ready, Ghost = p == peer,
+                        TeamId = p.inst.PlayerLandmassOwner.teamId
+                    });
+
+                using (NetApply.Scope())
+                    NetRegistrations.ApplyRoster(roster);
+
+                bool same = before.Count == Main.kCPlayers.Count;
+                foreach (var kv in before)
+                    same &= Main.kCPlayers.ContainsKey(kv.Key) && Main.kCPlayers[kv.Key].inst == kv.Value;
+
+                check("a roster keeps every kingdom's Player object", same);
+                check("a roster marks a player who is not connected as a ghost", peer.isGhost);
+
+                peer.isGhost = false;
+            }
+            catch (Exception ex)
+            {
+                check("the roster check finished without throwing", false);
+                Main.LogEx("[SELFTEST] roster", ex);
+            }
+        }
+
+        // ---- TAX ------------------------------------------------------------------------
+
+        /// <summary>
+        /// Another kingdom's tax rate lands on that kingdom, and only that kingdom.
+        ///
+        /// Rates live on each Player object and were never sent anywhere, so the host saved 0 for
+        /// every guest. Drives the real apply path with the peer as sender, then checks a bad rate
+        /// from the wire is refused. The peer's rate is put back afterwards so the save round trip
+        /// later in the run sees the session as it was.
+        /// </summary>
+        private static void TaxRatesReachTheirKingdom()
+        {
+            try
+            {
+                SessionPlayer peer = FindAnyPeer();
+                if (peer == null || peer.inst.PlayerLandmassOwner == null
+                    || peer.inst.PlayerLandmassOwner.ownedLandMasses.Count == 0)
+                {
+                    log("no peer kingdom with land, skipping the tax check");
+                    return;
+                }
+
+                int lm = peer.inst.PlayerLandmassOwner.ownedLandMasses.data[0];
+                float peerBefore = peer.inst.GetTaxRate(lm);
+                float localBefore = Player.inst.GetTaxRate(lm);
+
+                using (NetApply.Scope())
+                {
+                    NetRegistrations.ApplyTaxRate(new TaxRateMessage { Origin = peer.id, LandMass = lm, Rate = 1.5f });
+                    check("a peer's tax rate is set on the peer's kingdom", peer.inst.GetTaxRate(lm) == 1.5f);
+                    check("a peer's tax rate leaves the local kingdom alone", Player.inst.GetTaxRate(lm) == localBefore);
+
+                    NetRegistrations.ApplyTaxRate(new TaxRateMessage { Origin = peer.id, LandMass = lm, Rate = 99f });
+                    check("an out-of-range tax rate from the wire is refused", peer.inst.GetTaxRate(lm) == 1.5f);
+
+                    peer.inst.SetTaxRate(lm, peerBefore);
+                }
+            }
+            catch (Exception ex)
+            {
+                check("the tax rate check finished without throwing", false);
+                Main.LogEx("[SELFTEST] tax rates", ex);
+            }
+        }
+
+        // ---- SHARED HELPERS -------------------------------------------------------------
+
+        /// <summary>
+        /// Any kingdom that is not the local one.
+        ///
+        /// Not AutoTest's FindPeer, which looks up the FakePeer id specifically. These checks are
+        /// about the session as it actually is, so they should work against a real second player as
+        /// readily as against the dev fixture.
+        /// </summary>
+        private static SessionPlayer FindAnyPeer()
+        {
+            foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                if (kp != null && kp.inst != null && kp.inst != Player.inst) return kp;
+
+            return null;
+        }
+
+        /// <summary>
+        /// Whether a villager has been shut down, which is the game's word for dead.
+        ///
+        /// Reflected because the field is internal to the game's assembly. Cached, because this
+        /// runs once per villager per check and a lookup per villager is the difference between a
+        /// check and a stall.
+        /// </summary>
+        private static FieldInfo villagerShutdown;
+
+        private static bool IsShutDown(Villager v)
+        {
+            if (villagerShutdown == null)
+                villagerShutdown = typeof(Villager).GetField("shutdown",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (villagerShutdown == null) return false;   // a game update renamed it; do not fail over that
+            return (bool)villagerShutdown.GetValue(v);
+        }
+
+        /// <summary>Reads a field whether the game declares it public or private.</summary>
+        private static object ReadField(Player p, string name)
+        {
+            FieldInfo f = typeof(Player).GetField(name,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            return (f == null) ? null : f.GetValue(p);
+        }
+
+        /// <summary>
+        /// Row count of an array, an ArrayExt or a List, without naming any of their element types.
+        /// Minus one when the collection is absent.
+        ///
+        /// Reflection rather than eleven typed accessors: the point of the per-landmass check is
+        /// that a twelfth structure should be one line to add, and requiring its exact generic type
+        /// would defeat that.
+        /// </summary>
+        private static int RowCount(object collection)
+        {
+            if (collection == null) return -1;
+
+            Array asArray = collection as Array;
+            if (asArray != null) return asArray.Length;
+
+            Type t = collection.GetType();
+
+            PropertyInfo prop = t.GetProperty("Count");
+            if (prop != null && prop.PropertyType == typeof(int))
+                return (int)prop.GetValue(collection, null);
+
+            FieldInfo field = t.GetField("Count");
+            if (field != null && field.FieldType == typeof(int))
+                return (int)field.GetValue(collection);
+
+            return -1;
+        }
+    }
+}

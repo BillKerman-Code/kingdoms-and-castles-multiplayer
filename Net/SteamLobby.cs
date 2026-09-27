@@ -130,6 +130,11 @@ namespace KaCMultiplayer.Net
         /// </summary>
         public static void ResetNetworkState()
         {
+            // Before anything else, and deliberately not inside an Attempt: a stale "play has
+            // begun" would have the next lobby send its joiners a live snapshot of a world that
+            // does not exist yet.
+            Main.PlayHasBegun = false;
+
             Attempt("stop the server", delegate
             {
                 if (NetHost.server != null && NetHost.server.IsRunning) NetHost.server.Stop();
@@ -153,12 +158,14 @@ namespace KaCMultiplayer.Net
                 InGameChat.Reset();
                 KaCMultiplayer.Lobby.DiplomacyWindow.Reset();
                 KaCMultiplayer.Trade.ExportPrices.Reset();
+                KaCMultiplayer.Net.KingdomMirror.Reset();
                 KaCMultiplayer.Trade.ExportPricesWindow.Reset();
 
                 KaCMultiplayer.Lobby.DealRequestWindow.Reset();
                 KaCMultiplayer.Lobby.DealNoticeWindow.Reset();
                 KaCMultiplayer.Lobby.AllianceRequestWindow.Reset();
                 KaCMultiplayer.Lobby.AiProposalWindow.Reset();
+                KaCMultiplayer.Lobby.ResourcePicker.Reset();
             });
 
             Attempt("leave the Steam lobby", delegate
@@ -335,6 +342,16 @@ namespace KaCMultiplayer.Net
                 // Every kingdom needs its own island, so the map has to be an island map
                 // regardless of what the world settings say.
                 World.inst.mapBias = World.MapBias.Island;
+
+                // Size and rivers from the lobby too. Only the bias used to be set here, so the
+                // host's first map was built with whatever the world object last held, which is
+                // not necessarily what the lobby shows or what a guest will be told to build.
+                if (LobbySettings.Current != null)
+                {
+                    World.inst.mapSize = LobbySettings.Current.WorldSize;
+                    World.inst.mapRiverLakes = LobbySettings.Current.WorldRivers;
+                }
+
                 World.inst.Generate();
 
                 LobbyScreen.SeedBox.text = World.inst.GetTextSeed();

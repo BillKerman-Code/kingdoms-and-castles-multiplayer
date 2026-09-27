@@ -85,7 +85,7 @@ namespace KaCMultiplayer.Net
         public static void OnHandshake(HandshakeMessage m)
         {
             NetLog.Info("handshake: assigned client id " + m.AssignedClientId +
-                        (m.LoadingSave ? ", loading a save" : ", fresh game") +
+                        (m.WorldComesFromHost ? ", the world comes from the host" : ", fresh game") +
                         "; host on " + (string.IsNullOrEmpty(m.HostVersion) ? "an older build" : m.HostVersion) +
                         ", this machine on " + Main.ModVersion);
 
@@ -122,25 +122,26 @@ namespace KaCMultiplayer.Net
             // picker. Both conditions have to hold to reach the Load screen, and if neither branch
             // is taken the player is simply left on the ServerLobby set above, silently. Log the
             // decision so the next run says which input was wrong rather than leaving us guessing.
-            NetLog.Info("handshake routing: LoadingSave=" + m.LoadingSave +
+            NetLog.Info("handshake routing: WorldComesFromHost=" + m.WorldComesFromHost +
                         " NetHost.IsRunning=" + NetHost.IsRunning +
                         " SteamLobby.loadingSave=" + SteamLobby.loadingSave);
 
-            if (m.LoadingSave && NetHost.IsRunning)
+            if (m.WorldComesFromHost && NetHost.IsRunning)
             {
                 NetLog.Info("handshake routing -> Load (save picker)");
                 Main.TransitionTo(MenuState.Load);
             }
-            else if (!m.LoadingSave)
+            else if (!m.WorldComesFromHost)
             {
                 NetLog.Info("handshake routing -> NameAndBanner");
                 Main.TransitionTo(MenuState.NameAndBanner);
             }
             else
             {
-                // Joining a host that is resuming a save. Do NOT send them to NameAndBanner: their
-                // kingdom already exists in that save and naming a new one is how a returning
-                // player ends up placing a second keep beside their own city.
+                // Joining a host that is resuming a save, or a game already in progress. Do NOT
+                // send them to NameAndBanner: their kingdom already exists in what the host is
+                // about to send, and naming a new one is how a returning player ends up placing a
+                // second keep beside their own city.
                 //
                 // Nothing to decide yet either, because the save has not arrived. It is streamed
                 // in chunks (see SaveTransfer) and SessionSave.Unpack then matches this player by
@@ -177,10 +178,10 @@ namespace KaCMultiplayer.Net
             //
             // Checked here rather than in the connection-approval callback because that runs before
             // the client has told us who they are; the steamId only arrives with this message.
-            //
-            // Main.GameInProgress, not GameState.IsPlayMode: the ESC menu leaves play mode, and a
-            // host sitting in it is still in the middle of a game (see GameInProgress).
-            bool inProgress = Main.GameInProgress;
+            // Main.PlayHasBegun, not GameState.IsPlayMode(): a host with the pause or save menu
+            // open is not in play mode, and a stranger walking in at that moment must still be
+            // refused. Keep the value for choosing and logging the transfer below.
+            bool inProgress = Main.PlayHasBegun;
             if (inProgress && !Main.kCPlayers.ContainsKey(m.SteamId))
             {
                 NetLog.Info("refused " + m.Name + " (" + m.SteamId + "): game in progress and they have no kingdom here");
@@ -224,7 +225,7 @@ namespace KaCMultiplayer.Net
             // villagers and no kingdoms, with nothing logged to say so.
             //
             // It kept happening while the host had the ESC menu open, until this asked
-            // Main.GameInProgress rather than IsPlayMode. Logged, because the wrong choice is silent
+            // Main.PlayHasBegun rather than IsPlayMode. Logged, because the wrong choice is silent
             // on the host and only shows up on the joiner's screen.
             NetLog.Info("bringing " + m.Name + " up to date: "
                         + (inProgress ? "game in progress, sending the running world"
@@ -276,7 +277,7 @@ namespace KaCMultiplayer.Net
         }
 
         /// <summary>Sends the host's full view of the roster to every client but itself.</summary>
-        private static void BroadcastRoster()
+        internal static void BroadcastRoster()
         {
             List<SessionPlayer> players = Main.kCPlayers.Values.OrderBy(p => p.id).ToList();
             if (players.Count == 0) return;
@@ -287,10 +288,12 @@ namespace KaCMultiplayer.Net
                 {
                     ClientId = p.id,
                     SteamId = p.steamId,
-                    Name = p.name,
+                    // A saved kingdom whose player has not joined has no session name yet.
+                    Name = string.IsNullOrEmpty(p.name) ? p.SteamPersona() : p.name,
                     KingdomName = p.kingdomName,
                     Banner = p.banner,
                     Ready = p.ready,
+                    Ghost = p.isGhost,
                     // The host's team assignment travels with the roster so no client has to
                     // re-derive it from a client id Riptide may have recycled.
                     TeamId = (p.inst != null && p.inst.PlayerLandmassOwner != null)
@@ -565,12 +568,17 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private static void SyncFreshWorld(ushort clientId)
         {
-            NetRouter.Broadcast(new WorldSeedMessage { Seed = World.inst.seed }, NetClient.client.Id);
-
-            // Only to the joiner: players already in the session have these, and a second
-            // copy would duplicate them. The seed above is sent first, so the client
-            // regenerates, suppressing its own hazards, before these arrive.
+            // The host is already in this world, and the seed below would regenerate it.
             if (clientId == NetClient.client.Id) return;
+
+            // TO THE JOINER, NOT TO EVERYBODY. This was a broadcast, so every guest already in the
+            // lobby rebuilt their map and had every kingdom reset each time somebody else arrived.
+            // They do not need it: they were sent the seed when they joined, and a map that really
+            // changes goes out from LobbyScreen.RegenerateWorld.
+            //
+            // Sent before the catch-up below, so the client regenerates, suppressing its own
+            // hazards, before those arrive.
+            NetRouter.SendTo(WorldSeedMessage.ForCurrentWorld(), clientId);
 
             try
             {

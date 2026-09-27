@@ -105,7 +105,11 @@ namespace KaCMultiplayer.Net
             NetRegistry.OnClient<TreeFellMessage>(NetMessageId.TreeFell,
                 (m, ctx) => ApplyTreeFell(m));
 
-            NetRegistry.Register<TreeShakeMessage>(NetMessageId.TreeShake);
+            // UNRELIABLE: a tree wobbling as a woodcutter hits it, nothing more. It is sent from
+            // BaseCutterJob.UpdateWithEmployee, so every woodcutter in the kingdom produces a
+            // steady stream of them, and a lost wobble costs nobody anything. Sending them
+            // reliably meant each one held a retry slot until it was acked.
+            NetRegistry.Register<TreeShakeMessage>(NetMessageId.TreeShake, NetDelivery.Unreliable);
             NetRegistry.OnServer<TreeShakeMessage>(NetMessageId.TreeShake,
                 (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) ApplyTreeShake(m); });
             NetRegistry.OnClient<TreeShakeMessage>(NetMessageId.TreeShake,
@@ -261,9 +265,14 @@ namespace KaCMultiplayer.Net
             NetRegistry.OnClient<ArmyHealthMessage>(NetMessageId.ArmyHealth,
                 (m, ctx) => ApplyArmyHealth(m));
 
-            // Host-authoritative: sent from the host either as a broadcast on placement or
-            // targeted at a joining client to catch it up. Never travels upward.
+            // Travels both ways. The host broadcasts what it places and catches joiners up, and a
+            // guest reports the den its own cave turned into, because the cave that converts is the
+            // one next to YOUR keep and only your machine knows a keep went there. The host applies
+            // it and passes it on to everyone else; applying sets applyingWorldHazard, so nobody
+            // announces a den they were told about and the message cannot loop.
             NetRegistry.Register<HazardSpawnMessage>(NetMessageId.HazardSpawn);
+            NetRegistry.OnServer<HazardSpawnMessage>(NetMessageId.HazardSpawn,
+                (m, ctx) => { ApplyHazardSpawn(m); NetRouter.Broadcast(m, ctx.SenderId); });
             NetRegistry.OnClient<HazardSpawnMessage>(NetMessageId.HazardSpawn,
                 (m, ctx) => ApplyHazardSpawn(m));
 
@@ -278,6 +287,21 @@ namespace KaCMultiplayer.Net
                 (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) StorageSync.Apply(m); });
             NetRegistry.OnClient<StorageSnapshotMessage>(NetMessageId.StorageSnapshot,
                 (m, ctx) => StorageSync.Apply(m));
+
+            // A kingdom copy only ever travels upward, and a request only downward.
+            NetRegistry.Register<KingdomMirrorMessage>(NetMessageId.KingdomMirror);
+            NetRegistry.OnServer<KingdomMirrorMessage>(NetMessageId.KingdomMirror,
+                (m, ctx) => KingdomMirror.Receive(m));
+
+            NetRegistry.Register<KingdomMirrorRequestMessage>(NetMessageId.KingdomMirrorRequest);
+            NetRegistry.OnClient<KingdomMirrorRequestMessage>(NetMessageId.KingdomMirrorRequest,
+                (m, ctx) => KingdomMirror.SendOurs());
+
+            NetRegistry.Register<TaxRateMessage>(NetMessageId.TaxRate);
+            NetRegistry.OnServer<TaxRateMessage>(NetMessageId.TaxRate,
+                (m, ctx) => { if (NetRouter.RelayAndApply(m, ctx)) ApplyTaxRate(m); });
+            NetRegistry.OnClient<TaxRateMessage>(NetMessageId.TaxRate,
+                (m, ctx) => ApplyTaxRate(m));
 
             NetRegistry.Register<KeepUpgradeMessage>(NetMessageId.KeepUpgrade);
             NetRegistry.OnServer<KeepUpgradeMessage>(NetMessageId.KeepUpgrade,
@@ -489,7 +513,7 @@ namespace KaCMultiplayer.Net
             //
             // UNRELIABLE ON PURPOSE, and this is not an optimisation. A reliable message that
             // cannot be delivered within MaxSendAttempts makes Riptide disconnect the connection
-            // that sent it -- see PendingMessage.TrySend. This one is sent while the downstream is
+            // that sent it (see PendingMessage.TrySend). This one is sent while the downstream is
             // saturated with the very save it is asking for, so its acks lag, it retries, and it
             // hung the joining player up on themselves about two seconds into every join.
             //
@@ -548,13 +572,16 @@ namespace KaCMultiplayer.Net
         {
             try
             {
-                // A seed is for a lobby. Regenerating here would wipe a running game on this machine
-                // (every kingdom is reset below) while the host carries on in the real one, which
-                // is what happened to every guest when a host in its ESC menu let someone rejoin.
-                // The host no longer sends one then, and this is the backstop for any that do.
-                if (Main.GameInProgress)
+                // THE ONE GUARD THAT MAKES THIS SAFE WHEREVER IT IS SENT FROM. Regenerating resets
+                // every kingdom and rebuilds the map from scratch, which is right in the lobby and
+                // catastrophic afterwards: it is what wiped a rejoining player's year-30 world and
+                // dropped them on a new map while the host played on. A seed cannot reproduce a
+                // world that has been played in anyway, buildings, trees and hazards are not in it,
+                // so there is never a reason to take one once play has begun.
+                if (Main.PlayHasBegun)
                 {
-                    NetLog.Warn("world seed " + m.Seed + " arrived mid-game; ignored, this game's world is kept");
+                    NetLog.Warn("world seed " + m.Seed + " arrived after play began; ignored, "
+                                + "regenerating now would reset every kingdom on this machine");
                     return;
                 }
 
@@ -577,18 +604,25 @@ namespace KaCMultiplayer.Net
                     }
                 }
 
-                // Generation depends on the seed AND on type/size/rivers. The settings
-                // message is sent before this one, so LobbySettings.Current is
-                // already current, apply it before generating or the map comes out
-                // different until someone presses New Map.
-                if (LobbySettings.Current != null)
-                {
-                    World.inst.mapBias = LobbySettings.Current.WorldType;
-                    World.inst.mapRiverLakes = LobbySettings.Current.WorldRivers;
-                    World.inst.mapSize = LobbySettings.Current.WorldSize;
-                }
+                // Generation depends on the seed AND on type/size/rivers, and the message carries
+                // the values the host's map was really built with. Taken from here rather than
+                // from LobbySettings, which may not have arrived yet and can say "Random", which
+                // this machine would roll differently. See WorldSeedMessage.
+                World.inst.mapBias = (World.MapBias)m.MapBias;
+                World.inst.mapSize = (World.MapSize)m.MapSize;
+                World.inst.mapRiverLakes = (World.MapRiverLakes)m.RiverLakes;
 
                 World.inst.Generate(m.Seed);
+
+                // Said out loud if it did not take, because a mismatch here is precisely the
+                // "host and guest see different islands" report, and it is invisible otherwise.
+                if ((int)World.inst.generatedMapSize != m.MapSize
+                    || (int)World.inst.generatedRiverLakes != m.RiverLakes
+                    || (int)World.inst.generatedMapsBias != m.MapBias)
+                    NetLog.Warn("world seed " + m.Seed + ": asked for bias/size/rivers "
+                                + m.MapBias + "/" + m.MapSize + "/" + m.RiverLakes + " but generated "
+                                + (int)World.inst.generatedMapsBias + "/" + (int)World.inst.generatedMapSize
+                                + "/" + (int)World.inst.generatedRiverLakes);
                 LobbyScreen.mapPreviewDirty = true;
 
                 // The map has only just come into existence, and every kingdom built before now
@@ -1050,7 +1084,10 @@ namespace KaCMultiplayer.Net
             catch (Exception ex) { NetLog.Error("build place " + s.UniqueName, ex); }
         }
 
-        private static void ApplyBuildSnapshot(BuildSnapshotMessage m)
+        // internal, not private, so Dev/Invariants.cs can drive this handler directly.
+        // The check it exists for asks whether a snapshot COMMISSIONS a building rather than just
+        // marking it built, and there is no way to ask that without applying a real snapshot.
+        internal static void ApplyBuildSnapshot(BuildSnapshotMessage m)
         {
             if (IsOwnEcho(m.Origin)) return;
 
@@ -1274,7 +1311,21 @@ namespace KaCMultiplayer.Net
                 // Lets the placement past the client-side suppression hooks.
                 Main.applyingWorldHazard = true;
 
-                if (m.HazardType == 0) World.inst.AddWolfDen(m.X, m.Z);
+                if (m.HazardType == 0)
+                {
+                    // Two players can each have a keep near the same cave, and a joiner is caught
+                    // up on every den the host already has on top of whatever its own save
+                    // restored, so the same den gets announced more than once. Stacking two on one
+                    // tile would double the wolves out of it, which nothing would ever undo.
+                    if (DenExistsAt(m.X, m.Z))
+                    {
+                        NetLog.Info("wolf den at " + m.X + "," + m.Z + " is already here, ignored");
+                        return;
+                    }
+
+                    World.inst.AddWolfDen(m.X, m.Z);
+                    ClearCaveAt(m.X, m.Z);
+                }
                 else if (m.HazardType == 1) World.inst.AddWitchHut(m.X, m.Z);
                 else { NetLog.Warn("unknown hazard type " + m.HazardType); return; }
 
@@ -1282,6 +1333,56 @@ namespace KaCMultiplayer.Net
             }
             catch (Exception ex) { NetLog.Error("hazard spawn", ex); }
             finally { Main.applyingWorldHazard = false; }
+        }
+
+        /// <summary>
+        /// True when this machine already has a wolf den on the given cell. Reads the game's own
+        /// list of dens rather than scanning the scene, and bounds on Count because that list keeps
+        /// stale entries past it.
+        /// </summary>
+        private static bool DenExistsAt(int x, int z)
+        {
+            try
+            {
+                var dens = WolfDen.wolfDens;
+                if (dens == null) return false;
+
+                for (int i = 0; i < dens.Count; i++)
+                {
+                    WolfDen d = dens[i];
+                    if (d == null) continue;
+
+                    Cell cell = World.inst.GetCellData(d.transform.position);
+                    if (cell != null && cell.x == x && cell.z == z) return true;
+                }
+            }
+            catch (Exception ex) { NetLog.Error("looking for a wolf den", ex); }
+            return false;
+        }
+
+        /// <summary>
+        /// Removes the empty cave standing on a cell a wolf den has just been placed on.
+        ///
+        /// The machine whose keep triggered the conversion destroyed its own cave on the way past.
+        /// Every other machine is only being told the den exists, so without this the den is
+        /// dropped on top of a cave that is still there and the same spot looks different to each
+        /// player. A scan of the caves is fine here: dens are placed a handful of times in a whole
+        /// session, not per frame.
+        /// </summary>
+        private static void ClearCaveAt(int x, int z)
+        {
+            try
+            {
+                EmptyCave[] caves = UnityEngine.Object.FindObjectsOfType<EmptyCave>();
+                for (int i = 0; i < caves.Length; i++)
+                {
+                    Cell cell = World.inst.GetCellData(caves[i].transform.position);
+                    if (cell == null || cell.x != x || cell.z != z) continue;
+
+                    UnityEngine.Object.Destroy(caves[i].gameObject);
+                }
+            }
+            catch (Exception ex) { NetLog.Error("clearing the cave under a wolf den", ex); }
         }
 
         private static void ApplyEconomySnapshot(EconomySnapshotMessage m)
@@ -1318,6 +1419,30 @@ namespace KaCMultiplayer.Net
                 }
             }
             catch (Exception ex) { NetLog.Error("economy snapshot", ex); }
+        }
+
+        /// <summary>
+        /// Sets another kingdom's tax rate on this machine's copy of that kingdom, so its homes are
+        /// taxed at the owner's rate and the host saves the rate the owner actually chose.
+        ///
+        /// The island and rate come off the wire, so both are checked: SetTaxRate indexes an array
+        /// sized to the map, and the game's own buttons never go outside 0 to 3.
+        /// </summary>
+        internal static void ApplyTaxRate(TaxRateMessage m)
+        {
+            if (IsOwnEcho(m.Origin)) return;   // we set our own rate before sending it
+
+            SessionPlayer player;
+            if (!NetPlayers.TryGet(m.Origin, "tax rate", out player) || player.inst == null) return;
+
+            try
+            {
+                if (World.inst == null || m.LandMass < 0 || m.LandMass >= World.inst.NumLandMasses) return;
+                if (float.IsNaN(m.Rate) || m.Rate < 0f || m.Rate > 3f) return;
+
+                player.inst.SetTaxRate(m.LandMass, m.Rate);
+            }
+            catch (Exception ex) { NetLog.Error("tax rate", ex); }
         }
 
         private static void ApplyKeepUpgrade(KeepUpgradeMessage m)
@@ -1912,13 +2037,42 @@ namespace KaCMultiplayer.Net
                     Villager target = FindVillagerByGuid(m.Villager);
                     if (target == null) return;
 
-                    Player.inst.DestroyPerson(target, m.LeaveBody);
+                    // The DEAD VILLAGER'S OWN KINGDOM has to do this, not the local one.
+                    //
+                    // DestroyPerson takes the villager off the kingdom it is called on: its worker
+                    // list, its homeless list, its jobs. Called on the local player for somebody
+                    // else's villager, it tidies the wrong kingdom and leaves the dead villager on
+                    // the owner's lists for the rest of the session. Their homelessness penalty
+                    // then counts a corpse, and the host writes that into the save, which is one
+                    // half of the "homelessness became a permanent debuff" report (Workshop,
+                    // 2026-09-19) and of soldiers trained out of a town counting as homeless.
+                    OwnerOf(target).DestroyPerson(target, m.LeaveBody);
                 }
                 catch (Exception ex)
                 {
                     NetLog.Error("villager death", ex);
                 }
             }
+        }
+
+        /// <summary>
+        /// The kingdom a villager belongs to, by worker list, falling back to the local player.
+        ///
+        /// By membership rather than by who sent the message: the sender is normally the owner,
+        /// but a villager can be killed by somebody else's dragon or army, and the kingdom that
+        /// has to forget them is the one holding them.
+        /// </summary>
+        private static Player OwnerOf(Villager v)
+        {
+            foreach (SessionPlayer sp in Main.kCPlayers.Values)
+            {
+                if (sp == null || sp.inst == null || sp.inst.Workers == null) continue;
+
+                for (int i = 0; i < sp.inst.Workers.Count; i++)
+                    if (ReferenceEquals(sp.inst.Workers.data[i], v)) return sp.inst;
+            }
+
+            return Player.inst;
         }
 
         /// <summary>
@@ -2211,17 +2365,23 @@ namespace KaCMultiplayer.Net
         /// exist locally, so blindly adding would throw on a duplicate key. Update what is
         /// there, create only what is genuinely new.
         /// </summary>
-        private static void ApplyRoster(PeerRosterMessage m)
+        internal static void ApplyRoster(PeerRosterMessage m)
         {
             NetLog.Info("roster: " + (m.Players == null ? 0 : m.Players.Count) + " players");
-
-            LobbyView.ClearPlayers();
             if (m.Players == null) return;
+
+            // Updated in place, never wiped and rebuilt. A remote entry's Player object holds that
+            // kingdom once a save is unpacked, and a rebuilt entry gets a new, empty one: after a
+            // third player joined a loaded game, the kingdoms already on this machine lost their
+            // owner. Entries the host no longer lists are dropped at the end.
+            HashSet<string> listed = new HashSet<string>();
 
             int failed = 0;
 
             foreach (PeerRosterMessage.Entry e in m.Players)
             {
+                if (!string.IsNullOrEmpty(e.SteamId)) listed.Add(e.SteamId);
+
                 // Guarded PER ENTRY, because the whole roster used to ride on every entry
                 // succeeding. This handler has thrown before, on a half-built remote player, and the
                 // throw did not merely lose that one player: it abandoned the loop, so everybody
@@ -2244,6 +2404,7 @@ namespace KaCMultiplayer.Net
                         existing.ready = e.Ready;
                         existing.banner = e.Banner;
                         existing.kingdomName = e.KingdomName;
+                        if (e.SteamId != Main.PlayerSteamID) existing.isGhost = e.Ghost;
                     }
                     else
                     {
@@ -2252,11 +2413,14 @@ namespace KaCMultiplayer.Net
                             name = e.Name,
                             ready = e.Ready,
                             banner = e.Banner,
-                            kingdomName = e.KingdomName
+                            kingdomName = e.KingdomName,
+                            isGhost = e.Ghost
                         });
                     }
 
-                    Main.clientSteamIds[e.ClientId] = e.SteamId;
+                    // A ghost has no connection, and its placeholder client id is shared by every
+                    // ghost, so it must not claim that id.
+                    if (!e.Ghost) Main.clientSteamIds[e.ClientId] = e.SteamId;
 
                     // A player whose kingdom object is not built yet still belongs in the roster and
                     // on the lobby list; only their banner has to wait. Chaining straight through
@@ -2274,7 +2438,6 @@ namespace KaCMultiplayer.Net
                     else
                         NetLog.Info("roster: " + e.Name + " has no kingdom yet; banner deferred");
 
-                    LobbyView.AddPlayer(e.ClientId);
                 }
                 catch (Exception ex)
                 {
@@ -2286,6 +2449,16 @@ namespace KaCMultiplayer.Net
             if (failed > 0)
                 NetLog.Warn("roster: " + failed + " of " + m.Players.Count +
                             " entries could not be applied; the rest of the lobby is intact");
+
+            foreach (string gone in Main.kCPlayers.Keys.Where(k => !listed.Contains(k) && k != Main.PlayerSteamID).ToList())
+            {
+                SessionPlayer left = Main.kCPlayers[gone];
+                Main.kCPlayers.Remove(gone);
+                if (Main.clientSteamIds.ContainsKey(left.id) && Main.clientSteamIds[left.id] == gone)
+                    Main.clientSteamIds.Remove(left.id);
+            }
+
+            LobbyView.SyncRows();
         }
 
         /// <summary>

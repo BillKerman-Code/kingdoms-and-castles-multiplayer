@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -598,24 +598,14 @@ namespace KaCMultiplayer.Net
         private static readonly Dictionary<long, Deal> openDeals = new Dictionary<long, Deal>();
 
         /// <summary>
-        /// A deal between the moment it is Accepted and the moment its real payment amount is
-        /// known, keyed the same way <see cref="openDeals"/> is.
+        /// Deals accepted and not yet paid, keyed by pair, holding who pays.
         ///
-        /// Holds exactly what the eventual announcement needs to say ("Bill accepted the deal with
-        /// you, the war is over"): who to phrase it as having accepted, who the other side was, who
-        /// gets the "they accepted" popup, and whether peace already took effect. See the Accept
-        /// case in <see cref="ApplyDeal"/> for why the payment amount itself cannot be trusted yet
-        /// when Accept arrives, for anything other than gold.
+        /// A Settled message is only honoured for a pair in here, and only once. That is the whole
+        /// defence against a settlement nobody agreed to: every machine saw the Accept a moment
+        /// earlier (it is relayed through the host in order, ahead of the Settled that follows it),
+        /// so a Settled without one is either a duplicate or invented, and either way pays nothing.
         /// </summary>
-        private struct ResolvingDeal
-        {
-            public int AcceptorTeam;   // whoever sent Accept -- not necessarily the payer, see below
-            public int OtherTeam;
-            public int Proposer;       // only the proposer gets the "they accepted" popup
-            public bool WasFighting;
-        }
-
-        private static readonly Dictionary<long, ResolvingDeal> resolvingDeals = new Dictionary<long, ResolvingDeal>();
+        private static readonly Dictionary<long, int> awaitingSettlement = new Dictionary<long, int>();
 
         /// <summary>Applies a proposal or an answer. Runs identically on every machine.</summary>
         /// <summary>This machine's own team, or 0 before one is assigned. 0 is safe as a
@@ -717,173 +707,80 @@ namespace KaCMultiplayer.Net
                         }
 
                         openDeals.Remove(key);
+                        awaitingSettlement[key] = deal.Payer;
 
                         // Peace is immediate, and that is the point: a ransom paid after the next
-                        // season would buy nothing worth having. This is pure bookkeeping (a
-                        // dictionary and World.Relations), with no per-machine storage to read, so
-                        // every machine reaching the same conclusion here, independently, is exactly
-                        // as safe as it always was -- unlike the payment below.
+                        // season would buy nothing worth having. This part is decided identically
+                        // on every machine from the same message, so it is safe to do everywhere.
                         bool wasFighting = AtWar(m.FromTeam, m.ToTeam) || pendingWars.ContainsKey(key);
                         pendingWars.Remove(key);
                         if (wasFighting) Set(m.FromTeam, m.ToTeam, World.Relations.Neutral);
 
-                        if (deal.Resource == FreeResourceType.Gold)
+                        Announce(m.FromTeam, m.ToTeam, "accepted the deal with",
+                                 wasFighting ? "the war is over" : "payment on its way");
+
+                        // Same reasoning as Refuse above: only the proposer gets a popup, the
+                        // acceptor already knows, they just clicked Accept.
+                        if (deal.Proposer == MyTeamOrZero())
                         {
-                            // GOLD IS DIFFERENT, see MoveResource's own doc comment: it is a plain
-                            // int kept correct by determinism (tax income tracks Home occupancy,
-                            // which IS broadcast -- see the Villager Home hook -- and Tickable.TickAll,
-                            // what actually pays it, was already fixed to run exactly once per frame
-                            // world-wide by Main.TickAllForPlayer). Every machine computing this
-                            // identically is therefore still safe, so gold keeps the original
-                            // one-step resolution instead of the handshake below.
-                            int paid = MoveResource(deal.Payer, Other(deal.Payer, key), deal.Resource, deal.Amount);
-                            AnnounceDealAccepted(m.FromTeam, m.ToTeam, deal.Proposer, deal.Resource, paid, wasFighting);
-                            return;
+                            string byWho = Main.KingdomNameForTeam(Other(deal.Proposer, key));
+                            KaCMultiplayer.Lobby.DealNoticeWindow.ShowResolved("Accepted",
+                                byWho + " accepted your " + deal.Amount + " " + ResourceLabel(deal.Resource)
+                                + " request." + (wasFighting ? " The war is over." : ""));
                         }
 
-                        // EVERYTHING ELSE IS DIFFERENT, and this is the "10 offered, 0 paid" bug
-                        // from a real session log (Bill offers 10 Wood to Jebediah; Jebediah's own
-                        // report of the acceptance says 0 Wood paid).
+                        // THE PAYMENT IS NOT MOVED HERE, and it used to be. Every machine ran the
+                        // transfer against its OWN copy of the two kingdoms, and only the payer's
+                        // machine holds the payer's real stores; everyone else holds a mirror that
+                        // drifts. So the payer's machine took what the payer really had while the
+                        // payee's machine credited whatever its stale mirror said, and the two sides
+                        // could settle on different amounts from the same click.
                         //
-                        // Wood, Wheat, Stone and the rest live in job-worked storage buildings, not
-                        // in a plain field, and this machine's own copy of a FOREIGN kingdom's
-                        // storage cannot be trusted. Job.UpdateAssignment -- the one method in the
-                        // whole game that hands a villager a job, confirmed via IL: every production
-                        // job type (HarvesterJob, FreeResourceGathererJob, BaseCutterJob, etc.)
-                        // inherits it unmodified, none override it -- is deliberately skipped for
-                        // every kingdom but this machine's own (see JobUpdateAssignmentForeignHook
-                        // in Main.cs), so two machines cannot race to decide who works where.
-                        // Nothing was ever added to tell the OTHER machines what got decided; that
-                        // gap was explicitly judged safe to leave open because it only needed to be
-                        // right for SAVE data (Job.JobSaveData carries the employee guid directly),
-                        // not for a live storage total read by something else entirely. So on any
-                        // machine that is not a kingdom's own, that kingdom's production jobs simply
-                        // never get a worker locally: Building.WorkersAllocated never rises (it is
-                        // only touched by Building.OnAssigned/OnUnAssigned, themselves only reached
-                        // through that same skipped assignment), GetWorkerPercent() stays near zero,
-                        // and the storage buildings TakeFrom/GiveTo actually read
-                        // (FreeResourceManager.inst.GetResourceStorageListFor) sit near-empty in
-                        // that machine's own memory, forever, even while the owning machine's own
-                        // copy is full and growing normally.
-                        //
-                        // Before this fix, MoveResource ran identically on every machine INCLUDING
-                        // the payee's own machine, so the payee's own authoritative deposit used an
-                        // amount read from ITS OWN (foreign, worker-starved) view of the payer's
-                        // supply. A real 10 Wood on the payer's own machine became a real 0 Wood
-                        // taken -- and therefore 0 given -- on the payee's own machine: not merely a
-                        // wrong number on screen, the wood was genuinely deducted from the payer (by
-                        // the payer's OWN correct machine, which also ran this same code) and
-                        // genuinely never arrived for the payee. Gold never showed this because
-                        // nothing about it depends on job assignment.
-                        //
-                        // The fix is the same shape as every other "who decides" gap closed this
-                        // session (BarracksTickForeignHook, PlayerUpdatePersonArrivalForeignHook):
-                        // the one machine that can trust its own reading decides, and everyone else
-                        // waits for what it broadcasts instead of computing their own answer.
-                        // DealKind.Resolved is that broadcast, sent only by the payer's own machine,
-                        // once TakeFrom has run against its own real storage. If that machine has
-                        // since disconnected, nothing ever arrives and this entry is simply never
-                        // resolved -- the same fate any owner-decided action has when its owner
-                        // leaves mid-decision, and not something this fix attempts to cover.
-                        resolvingDeals[key] = new ResolvingDeal
-                        {
-                            AcceptorTeam = m.FromTeam,
-                            OtherTeam = m.ToTeam,
-                            Proposer = deal.Proposer,
-                            WasFighting = wasFighting
-                        };
-
-                        if (deal.Payer == MyTeamOrZero())
-                        {
-                            LandmassOwner payer = World.GetLandmassOwnerByTeamId(deal.Payer);
-                            int taken = payer != null ? TakeFrom(payer, deal.Resource, deal.Amount) : 0;
-
-                            Send(deal.Payer, Other(deal.Payer, key), Messages.DealKind.Resolved,
-                                 taken, deal.Resource);
-                        }
+                        // Now exactly one machine measures: whoever answers for the payer's
+                        // treasury. It takes the goods and announces the amount it actually got,
+                        // and every machine credits that one number. See Settle.
+                        if (SettlesFor(deal.Payer))
+                            Settle(deal.Payer, Other(deal.Payer, key), deal.Resource, deal.Amount);
                         return;
                     }
 
-                    case Messages.DealKind.Resolved:
+                    case Messages.DealKind.Settled:
                     {
-                        // Sent only by the payer's own machine (see the Accept case above):
-                        // FromTeam is the payer, ToTeam the payee, Amount what the payer's own
-                        // TakeFrom actually removed from ITS OWN real storage. Relayed to everyone
-                        // including the payer, same as every other deal message, but only the
-                        // PAYEE's own machine may deposit it for real -- depositing it on any other
-                        // machine would just be writing a correct number into another foreign,
-                        // untrustworthy mirror.
-                        FreeResourceType res;
-                        if (!ValidResource(m.Resource, out res))
+                        // FromTeam is the payer, ToTeam the payee, Amount what really moved.
+                        int payerExpected;
+                        if (!awaitingSettlement.TryGetValue(key, out payerExpected) || payerExpected != m.FromTeam)
                         {
-                            NetLog.Warn("deal: resolved message named unknown resource " + m.Resource + ", ignored");
+                            NetLog.Warn("deal: settlement for team " + m.FromTeam + " -> " + m.ToTeam
+                                        + " matches no accepted deal, ignored");
                             return;
                         }
+                        awaitingSettlement.Remove(key);
 
-                        int given = m.Amount;
-                        if (m.Amount > 0 && m.ToTeam == MyTeamOrZero())
-                        {
-                            LandmassOwner payee = World.GetLandmassOwnerByTeamId(m.ToTeam);
-                            given = payee != null ? GiveTo(payee, res, m.Amount) : 0;
+                        FreeResourceType res;
+                        if (!ValidResource(m.Resource, out res)) return;
+                        int amount = System.Math.Max(0, m.Amount);
 
-                            if (given < m.Amount)
-                            {
-                                // No room at the payee's end. The payer's own machine already
-                                // removed the full amount from its own real storage, so the
-                                // shortfall has to travel back there to avoid quietly destroying
-                                // it -- the same "clamped, not destroyed" rule MoveResource always
-                                // applied back when one machine could still do both halves itself.
-                                NetLog.Warn("deal: team " + m.ToTeam + " had room for only " + given
-                                            + " of " + m.Amount + " " + ResourceLabel(res)
-                                            + "; returning " + (m.Amount - given) + " to team " + m.FromTeam);
-                                Send(m.ToTeam, m.FromTeam, Messages.DealKind.Returned,
-                                     m.Amount - given, res);
-                            }
-                        }
+                        // The machine that sent this already took the goods when it measured them.
+                        // Everyone else takes the same amount off their copy of the payer, so no
+                        // mirror is left holding goods the payer no longer has.
+                        if (m.Origin != NetRouter.LocalClientId)
+                            TakeFromKingdom(m.FromTeam, res, amount);
 
-                        long rkey = Key(m.FromTeam, m.ToTeam);
-                        ResolvingDeal info;
-                        if (resolvingDeals.TryGetValue(rkey, out info))
-                        {
-                            resolvingDeals.Remove(rkey);
-                            AnnounceDealAccepted(info.AcceptorTeam, info.OtherTeam, info.Proposer,
-                                                  res, given, info.WasFighting);
-                        }
+                        int given = GiveToKingdom(m.ToTeam, res, amount);
+
+                        string what = amount + " " + ResourceLabel(res);
+                        if (amount == 0)
+                            Announce(m.FromTeam, m.ToTeam, "had nothing to pay", "no " + ResourceLabel(res) + " in store");
                         else
-                        {
-                            // No local record of the Accept that led here (e.g. this machine joined
-                            // the session in the gap between the two messages). Nothing left to
-                            // announce to a specific player, but the transfer itself already
-                            // happened above, so it is worth a line rather than vanishing silently.
-                            NetLog.Info("deal: team " + m.FromTeam + " paid team " + m.ToTeam + " "
-                                        + given + " " + ResourceLabel(res) + " (no local record of the accept)");
-                        }
-                        return;
-                    }
+                            Announce(m.FromTeam, m.ToTeam, "paid", what);
 
-                    case Messages.DealKind.Returned:
-                    {
-                        // The payee could not fit everything (see Resolved above); FromTeam is the
-                        // payee sending it back, ToTeam the payer. Only the payer's own machine may
-                        // deposit it, for the same reason only the payee's own machine deposited the
-                        // original amount.
-                        //
-                        // KNOWN, ACCEPTED IMPRECISION: the payer's own Announce already fired back
-                        // in Resolved, using the full amount it took (it has no way to know yet
-                        // whether the payee will have room for all of it), so on the rare "warehouse
-                        // is full" path the payer's own screen can report a slightly higher number
-                        // than the payee actually received. The GAME STATE this message restores is
-                        // exact either way -- nothing is lost or duplicated -- only that one late
-                        // announcement text is not retroactively corrected. Reporting it correctly on
-                        // both sides would mean the payer waiting for a THIRD hop before announcing
-                        // anything, for a warehouse-capacity edge case the original single-machine
-                        // code only ever warned about, never fully solved for both parties either.
-                        FreeResourceType res;
-                        if (m.Amount > 0 && m.ToTeam == MyTeamOrZero() && ValidResource(m.Resource, out res))
-                        {
-                            LandmassOwner payer = World.GetLandmassOwnerByTeamId(m.ToTeam);
-                            if (payer != null) GiveTo(payer, res, m.Amount);
-                        }
+                        // Only the payee's machine holds the payee's real stores, so only it can know
+                        // the goods did not fit. They cannot go back: the payer's machine has already
+                        // spent them. Said out loud rather than lost quietly, and it cannot happen to
+                        // gold, which needs no storage.
+                        if (given < amount && m.ToTeam == MyTeamOrZero())
+                            Tell("you had room for only " + given + " of the " + what
+                                 + "; build more storage before accepting goods");
                         return;
                     }
                 }
@@ -935,41 +832,92 @@ namespace KaCMultiplayer.Net
         }
 
         /// <summary>
-        /// Moves gold between two kingdoms, and returns what actually moved.
+        /// Whether THIS machine answers for a kingdom's treasury when it has to pay.
         ///
-        /// GOLD ONLY, and deliberately so now -- it used to also move every other resource,
-        /// computing TakeFrom and GiveTo together on whichever machine's own call to ApplyDeal
-        /// happened to run. That was safe for gold, a plain int kept accurate by determinism (see
-        /// the Accept case in ApplyDeal for exactly why), but not for anything living in a
-        /// job-worked storage building, where a foreign machine's own copy of another kingdom's
-        /// storage can be badly wrong. That half moved into ApplyDeal's own
-        /// Accept/Resolved/Returned handshake, which calls TakeFrom and GiveTo directly, on
-        /// whichever machine can actually trust its own reading. Kept here, rather than inlined at
-        /// its one remaining call site, because "clamped to what the payer holds rather than
-        /// refused outright" and its own log line are worth keeping named.
-        ///
-        /// Clamped to what the payer holds rather than refused outright, matching how the mod
-        /// already settles a merchant delivery somebody cannot fully afford. A ransom nobody can
-        /// quite pay should still end the war for everything they have, not fail and leave both
-        /// sides confused about whether the deal went through.
+        /// The owner's own machine, because only it holds that kingdom's real stores. A kingdom with
+        /// nobody connected to answer for it (a restored kingdom whose owner has not rejoined, or
+        /// the dev FakePeer) is settled by the host, the one machine that is always present.
+        /// Exactly one machine says yes for any given team, so exactly one Settled goes out.
         /// </summary>
-        private static int MoveResource(int payerTeam, int payeeTeam, FreeResourceType type, int amount)
+        private static bool SettlesFor(int payerTeam)
+        {
+            if (payerTeam == MyTeamOrZero()) return true;
+            return NetHost.IsRunning && !HasLiveOwner(payerTeam);
+        }
+
+        /// <summary>True when the player who owns this team is connected right now.</summary>
+        private static bool HasLiveOwner(int team)
+        {
+            SessionPlayer p = NetPlayers.ByTeam(team);
+            if (p == null || string.IsNullOrEmpty(p.steamId)) return false;
+            if (p.steamId == Main.PlayerSteamID) return true;   // us
+
+            foreach (string steamId in Main.clientSteamIds.Values)
+                if (steamId == p.steamId) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Takes the payment out of the payer's treasury on this machine and tells everyone how
+        /// much it came to. Only ever called where <see cref="SettlesFor"/> said yes.
+        ///
+        /// Clamped to what the payer holds rather than refused, matching how the mod settles a
+        /// merchant delivery somebody cannot fully afford: a ransom nobody can quite pay should
+        /// still end the war for everything they have. A payment of zero is still announced, so
+        /// both sides learn the deal went through and there was nothing in store to pay it with.
+        /// </summary>
+        private static void Settle(int payerTeam, int payeeTeam, FreeResourceType type, int amount)
+        {
+            int taken = TakeFromKingdom(payerTeam, type, amount);
+
+            NetLog.Info("deal: team " + payerTeam + " pays team " + payeeTeam + " " + taken + " "
+                        + ResourceLabel(type) + (taken < amount ? (" (asked " + amount + ")") : ""));
+
+            Send(payerTeam, payeeTeam, Messages.DealKind.Settled, taken, type);
+        }
+
+        /// <summary>
+        /// Removes up to <paramref name="amount"/> of a resource from a kingdom, gold included, and
+        /// returns how much it actually held.
+        ///
+        /// Gold is a special case and deliberately kept one: it lives as a plain int on
+        /// LandmassOwner rather than in any building, so it needs none of the storage walking and
+        /// cannot be limited by warehouse space. Everything else lives in BUILDINGS, so taking it
+        /// means emptying the kingdom's stores.
+        /// </summary>
+        private static int TakeFromKingdom(int team, FreeResourceType type, int amount)
         {
             if (amount <= 0 || type != FreeResourceType.Gold) return 0;
 
-            LandmassOwner payer = World.GetLandmassOwnerByTeamId(payerTeam);
-            LandmassOwner payee = World.GetLandmassOwnerByTeamId(payeeTeam);
-            if (payer == null || payee == null) return 0;
+            LandmassOwner owner = World.GetLandmassOwnerByTeamId(team);
+            if (owner == null) return 0;
 
-            int paid = System.Math.Min(amount, System.Math.Max(0, payer.Gold));
-            if (paid <= 0) return 0;
+            if (type == FreeResourceType.Gold)
+            {
+                int paid = System.Math.Min(amount, System.Math.Max(0, owner.Gold));
+                owner.Gold -= paid;
+                return paid;
+            }
 
-            payer.Gold -= paid;
-            payee.Gold += paid;
+            return TakeFrom(owner, type, amount);
+        }
 
-            NetLog.Info("deal: team " + payerTeam + " paid team " + payeeTeam + " " + paid + " gold"
-                        + (paid < amount ? (" (asked " + amount + ", that is all they had)") : ""));
-            return paid;
+        /// <summary>Adds up to <paramref name="amount"/> to a kingdom, gold included, and returns how much fitted.</summary>
+        private static int GiveToKingdom(int team, FreeResourceType type, int amount)
+        {
+            if (amount <= 0) return 0;
+
+            LandmassOwner owner = World.GetLandmassOwnerByTeamId(team);
+            if (owner == null) return 0;
+
+            if (type == FreeResourceType.Gold)
+            {
+                owner.Gold += amount;
+                return amount;
+            }
+
+            return GiveTo(owner, type, amount);
         }
 
         /// <summary>Removes up to <paramref name="want"/> of a resource from a kingdom's stores.</summary>
@@ -1432,6 +1380,14 @@ namespace KaCMultiplayer.Net
         public static void Reset()
         {
             relations.Clear();
+
+            // Every other piece of diplomacy is session state too, and none of it was cleared, so
+            // an open demand, an alliance offer or a declared war from one session was still
+            // waiting in the next, against whoever happened to be handed the same team number.
+            openDeals.Clear();
+            awaitingSettlement.Clear();
+            allianceOffers.Clear();
+            pendingWars.Clear();
             revealedFor.Clear();
             revealAfterLoadAt = -1f;
             revealsAfterLoad = 0;

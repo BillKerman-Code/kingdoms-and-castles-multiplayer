@@ -237,7 +237,15 @@ namespace KaCMultiplayer.Dev
             Log("session is up, running checks");
 
             CheckSessionBasics();
+            PrepareConstructionSiteFixture();
             CheckFakePeer();
+
+            // The class checks, before anything below disturbs the world. They read the session as
+            // it stands rather than building fixtures, so they are honest only while it is still
+            // the session the earlier phases produced. See Dev/Invariants.cs for what a "class
+            // check" is and why it is kept separate from the feature checks around it.
+            Invariants.RunAll(Check, Log);
+
             CheckTradeFixture();
             CheckDiplomacy();
             CheckChat();
@@ -253,9 +261,93 @@ namespace KaCMultiplayer.Dev
             PrepareIdSurvivalFixture();
             CheckSaveRoundTrip();
             CheckSaveLoadsBack();
+            Invariants.BuildingJobsAreRegistered("after the save loads back");
             CheckMaterialsAreComplete();
             CheckIdsSurvivedTheLoad();
             PrepareHostBuildFixture();
+            PrepareLobbyDriftTrap();
+        }
+
+        // The difficulty the world is actually running at, recorded so the soak check can ask
+        // whether anything overwrote it. Minus one means the trap could not be set.
+        private static int difficultyUnderTest = -1;
+
+        /// <summary>
+        /// Sets a trap for lobby state clobbering the running game, to be read after the battle.
+        ///
+        /// A CLASS, not a bug. The lobby is the authority while a session is being set up and it
+        /// broadcasts its settings continuously, roughly twice a second, for the whole session. Any
+        /// world state that both the lobby and the game own is therefore in a fight that the lobby
+        /// wins, every half second, forever. Difficulty is the instance that was found: a Hard save
+        /// loaded into a lobby still holding the default became Peaceful within half a second and
+        /// would not stay changed, and difficulty decides a great deal, dragons do not spawn on
+        /// Peaceful at all.
+        ///
+        /// So the trap is deliberately the wrong way round. It makes the LOBBY disagree with the
+        /// GAME and then leaves them to fight for the length of the battle. If the game's value
+        /// survives, play mode is properly insulated from the lobby; if it has become the lobby's
+        /// value, whatever else was broadcast that half second is suspect too.
+        ///
+        /// Read in FinishBattle rather than here, because half a second is the whole point: a
+        /// same-frame check would pass on the broken build. This is the same prepare-then-verify
+        /// shape as the host build fixture, for the same reason.
+        /// </summary>
+        private static void PrepareLobbyDriftTrap()
+        {
+            difficultyUnderTest = -1;
+
+            try
+            {
+                if (Player.inst == null) { Log("no local kingdom, cannot set the lobby drift trap"); return; }
+
+                difficultyUnderTest = (int)Player.inst.difficulty;
+
+                // Any value the game is NOT running at. Nudging by one and wrapping off the enum's
+                // own length keeps this free of a hardcoded count, which the GameDifficulty file
+                // warns about drifting for exactly this kind of reason.
+                int choices = Enum.GetValues(typeof(GameDifficulty)).Length;
+                int disagree = (difficultyUnderTest + 1) % choices;
+                LobbySettings.Current.Difficulty = disagree;
+
+                Log("lobby drift trap set: the game is on difficulty " + difficultyUnderTest
+                    + " and the lobby now claims " + disagree
+                    + "; the game's value must still be " + difficultyUnderTest + " after the battle");
+            }
+            catch (Exception ex)
+            {
+                difficultyUnderTest = -1;
+                Main.LogEx("[SELFTEST] setting the lobby drift trap", ex);
+            }
+        }
+
+        /// <summary>Reads the trap set by <see cref="PrepareLobbyDriftTrap"/>. See its note.</summary>
+        private static void CheckLobbyDidNotClobberPlayMode()
+        {
+            if (difficultyUnderTest < 0) { Log("no lobby drift trap was set, nothing to re-check"); return; }
+
+            try
+            {
+                int now = (int)Player.inst.difficulty;
+
+                if (now != difficultyUnderTest)
+                    Log("the lobby overwrote the running game's difficulty: " + difficultyUnderTest
+                        + " became " + now + " while the session was playing");
+
+                Check("the running game's difficulty survives the lobby's broadcasts",
+                      now == difficultyUnderTest);
+            }
+            catch (Exception ex)
+            {
+                Check("the lobby drift check finished without throwing", false);
+                Main.LogEx("[SELFTEST] lobby drift", ex);
+            }
+            finally
+            {
+                // Disarm the trap. The lobby's record was deliberately made wrong, and the host
+                // still sends it to anybody who joins mid-session, so leaving it would hand a later
+                // joiner the wrong difficulty for the rest of the run.
+                try { LobbySettings.Current.Difficulty = difficultyUnderTest; } catch { }
+            }
         }
 
         /// <summary>
@@ -350,7 +442,7 @@ namespace KaCMultiplayer.Dev
         /// The specific chain it exists to catch: LandmassOwner.SetBannerIdx ends by calling
         /// UnitSystem.UpdateMaterialFor, which walks every army dereferencing generalComponent with
         /// no null check. One army without a general mid-load throws, and everything after that
-        /// call is skipped -- including the loop that builds UniMaterialsCracked, the array every
+        /// call is skipped, including the loop that builds UniMaterialsCracked, the array every
         /// building picks its material from. So UniMaterialsCracked is asserted element by element
         /// rather than merely for being non-null: a half-built array is exactly what that bug
         /// leaves behind.
@@ -433,11 +525,19 @@ namespace KaCMultiplayer.Dev
                 if (categories == null) Log("could not read unitCategoriesGen, so unit materials were not checked");
                 else
                 {
+                    // The game builds categories for teams 0, 2, 3 and 4 only, and each session
+                    // kingdom borrows one of them (Main.UnitCategoryTeamFor). A category no kingdom
+                    // borrows is never painted and has no soldiers to draw, so it is not asked about.
+                    HashSet<int> used = new HashSet<int>();
+                    foreach (SessionPlayer kp in Main.kCPlayers.Values)
+                        if (kp != null && kp.inst != null && kp.inst.PlayerLandmassOwner != null)
+                            used.Add(Main.UnitCategoryTeamFor(kp.inst.PlayerLandmassOwner.teamId));
+
                     int cats = 0, litCats = 0;
                     for (int i = 0; i < categories.Count; i++)
                     {
                         UnitSystem.UnitCategory cat = categories[i];
-                        if (cat == null) continue;
+                        if (cat == null || !used.Contains(cat.teamId)) continue;
 
                         cats++;
                         if (cat.mat != null) litCats++;
@@ -684,6 +784,61 @@ namespace KaCMultiplayer.Dev
         // has run. Guid.Empty means it could not be placed at all, which is itself the report.
         private static Guid hostBuilt = Guid.Empty;
         private static Guid hostKeepAtBuildTime = Guid.Empty;
+
+        private static Building siteFixture;
+
+        /// <summary>How many of the construction site fixture's jobs the job system still knows.</summary>
+        private static string FixtureJobsRegistered()
+        {
+            if (siteFixture == null) return "no site fixture";
+            int known = 0;
+            var jobs = JobSystem.inst.jobs;
+            foreach (Job j in siteFixture.jobs)
+                for (int lm = 0; lm < jobs.Count; lm++)
+                    for (int c = 0; c < jobs.data[lm].Count; c++)
+                        if (jobs.data[lm].data[c].Contains(j)) known++;
+            return known + " of " + siteFixture.jobs.Count + " site jobs registered";
+        }
+
+        /// <summary>
+        /// Places an unfinished house for the local kingdom and gives it its builder jobs, BEFORE
+        /// the fake peer arrives.
+        ///
+        /// The peer is built the way a remote player is, and building a remote player runs
+        /// Player.Reset, which empties the global job system. A site that already holds builder
+        /// jobs at that moment is exactly the state the "builders forget to finish after a
+        /// rejoin" report describes, so Invariants.BuildingJobsAreRegistered has something real
+        /// to look at rather than a town with no jobs in it.
+        /// </summary>
+        private static void PrepareConstructionSiteFixture()
+        {
+            try
+            {
+                if (Player.inst == null || Player.inst.keep == null) { Log("no keep, no construction site fixture"); return; }
+
+                Cell site = World.inst.GetCellDataClamped(Player.inst.keep.transform.position + new Vector3(4f, 0f, 0f));
+                if (site == null) { Log("no cell for the construction site fixture"); return; }
+
+                Building b = UnityEngine.Object.Instantiate<Building>(
+                    GameState.inst.GetPlaceableByUniqueName("smallhouse"));
+                b.Init();
+                b.transform.position = site.Position;
+                b.SendMessage("OnPlayerPlacement", SendMessageOptions.DontRequireReceiver);
+                World.inst.Place(b);
+
+                // UpdateConstruction would add these on its next tick; adding them now means the
+                // peer's Reset cannot run first.
+                typeof(Building).GetMethod("TryAddBuilderJobs", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+                    .Invoke(b, null);
+
+                siteFixture = b;
+                Log("construction site fixture placed: " + b.guid + " with " + b.jobs.Count + " builder job(s)");
+            }
+            catch (Exception ex)
+            {
+                Main.LogEx("[SELFTEST] construction site fixture", ex);
+            }
+        }
 
         /// <summary>
         /// Places one building as a PLAYER does, broadcast and all, and remembers it.
@@ -967,8 +1122,24 @@ namespace KaCMultiplayer.Dev
 
                 // Dark by default, so with the flag off the sweep must never put anything on the
                 // wire. Same shape as the combat-sync silence check.
+                //
+                // The sweep only announces an army that moved since its last announcement, and ours
+                // has already been announced where it stands, so it is forgotten first, the way a
+                // new session starts. With no army of our own one is raised beside the keep, kept
+                // off the wire, and released again afterwards.
+                UnitSystem.Army raised = null;
+                if (Main.ArmyPositionSyncEnabled && ours == null && Player.inst.keep != null)
+                    using (NetApply.Scope())
+                        raised = UnitSystem.inst.MakeArmy(Player.inst.keep.transform.position
+                            + new Vector3(3f, 0f, 3f), localTeam, UnitSystem.ArmyType.Default, addUnits: true);
+                if (Main.ArmyPositionSyncEnabled) ArmyPositionSync.Reset();
+
                 int publishedBefore = ArmyPositionSync.Published;
-                for (int i = 0; i < 40; i++) ArmyPositionSync.Tick();
+                try { for (int i = 0; i < 40; i++) ArmyPositionSync.Tick(); }
+                finally
+                {
+                    if (raised != null) using (NetApply.Scope()) UnitSystem.inst.ReleaseArmy(raised);
+                }
 
                 if (Main.ArmyPositionSyncEnabled)
                     Check("army positions are announced while the feature is on",
@@ -1558,7 +1729,9 @@ namespace KaCMultiplayer.Dev
 
         private static void CheckFakePeer()
         {
+            Log("before the peer: " + FixtureJobsRegistered());
             FakePeer.Toggle();   // spawn
+            Log("after the peer: " + FixtureJobsRegistered());
 
             Check("the fake peer spawned as a second kingdom", FakePeer.IsActive);
 
@@ -1856,6 +2029,7 @@ namespace KaCMultiplayer.Dev
                 // The two Workshop reports: a host's building, and the host's keep, still standing
                 // after the session has actually been running.
                 CheckHostBuildSurvived();
+                CheckLobbyDidNotClobberPlayMode();
 
                 // Releasing is the single choke point every army death funnels through, so it is
                 // asserted on an army that has actually been in combat.

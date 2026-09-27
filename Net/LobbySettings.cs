@@ -91,6 +91,15 @@ namespace KaCMultiplayer.Net
 
         public bool FogOfWar { get; set; }
 
+        /// <summary>The host is loading a saved game, so the world settings come from the save.</summary>
+        public bool SavedGame { get; set; }
+
+        /// <summary>The saved game's year, or 0 until the host has read the save.</summary>
+        public int SavedYear { get; set; }
+
+        /// <summary>How many kingdoms the save holds, or 0 until the host has read it.</summary>
+        public int SavedKingdoms { get; set; }
+
         /// <summary>Most AI kingdoms a session can hold: the game's own AI team range is 2-4.</summary>
         public const int MaxAiKingdoms = 3;
 
@@ -168,6 +177,9 @@ namespace KaCMultiplayer.Net
             WorldRivers = other.WorldRivers;
             PlacementType = other.PlacementType;
             FogOfWar = other.FogOfWar;
+            SavedGame = other.SavedGame;
+            SavedYear = other.SavedYear;
+            SavedKingdoms = other.SavedKingdoms;
             AiKingdomCount = other.AiKingdomCount;
             System.Array.Copy(other.AiDifficulties, AiDifficulties, MaxAiKingdoms);
             System.Array.Copy(other.AiCodes, AiCodes, MaxAiKingdoms);

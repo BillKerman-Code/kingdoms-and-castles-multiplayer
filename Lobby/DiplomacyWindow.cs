@@ -294,21 +294,12 @@ namespace KaCMultiplayer.Lobby
             Wire(row, "Neutral", delegate { Main.RequestRelationChange(target, World.Relations.Neutral); });
             Wire(row, "War", delegate { Main.RequestRelationChange(target, World.Relations.Enemy); });
 
-            // ONLY THE BUTTONS THAT MEAN SOMETHING RIGHT NOW.
-            //
-            // The row has room for four buttons and there are five things you might do, so adding
-            // Demand and Send Aid pushed the rest off the end -- which is how Demand came to be
-            // invisible while still existing. Rather than shrink everything, each relation button
-            // is shown only in the state where it does something, which never leaves more than
-            // four on the row:
+            // Only the buttons that mean something right now. The row's Actions group closes up
+            // around hidden buttons, so each state shows just its own choices:
             //
             //   neutral   Demand  Send Aid  Ally            War
             //   allied    Demand  Send Aid  Break Alliance
             //   at war    Demand  Send Aid  Make Peace
-            //
-            // Offering an alliance to an ally did nothing, declaring war on someone you are already
-            // at war with did nothing, and "Neutral" was the only way out of an alliance despite not
-            // reading as one. Each of those is now either relabelled or absent.
             bool allied = now == World.Relations.Allies;
             bool atWar = now == World.Relations.Enemy;
 
@@ -326,11 +317,8 @@ namespace KaCMultiplayer.Lobby
             // before they can be fought, so Break Alliance is the only way to that button.
             SetActive(row, "War", !atWar && !allied);
 
-            // Cloned from Neutral for the same reason the Demand button is: the row prefab ships
-            // three buttons, and cloning inherits its size, font, colours and anchoring rather than
-            // restating them here.
-            CloneRowButton(row, "Demand", "Demand", 1, delegate { ResourcePicker.Open(localTeam, target, false); });
-            CloneRowButton(row, "SendAid", "Send Aid", 2, delegate { ResourcePicker.Open(localTeam, target, true); });
+            Wire(row, "Demand", delegate { ResourcePicker.Open(localTeam, target, false); });
+            Wire(row, "SendAid", delegate { ResourcePicker.Open(localTeam, target, true); });
 
             // Last, so the cloned Demand and Send Aid buttons get the game's art too.
             KacGameArt.SkinRow(row);
@@ -385,8 +373,8 @@ namespace KaCMultiplayer.Lobby
 
             // The resource picker ends in PlayerRelations.Send, which hands an AI target to
             // AiDiplomacy instead of sending a deal message nobody could answer.
-            CloneRowButton(row, "Demand", "Demand", 1, delegate { ResourcePicker.Open(localTeam, target, false); });
-            CloneRowButton(row, "SendAid", "Send Aid", 2, delegate { ResourcePicker.Open(localTeam, target, true); });
+            Wire(row, "Demand", delegate { ResourcePicker.Open(localTeam, target, false); });
+            Wire(row, "SendAid", delegate { ResourcePicker.Open(localTeam, target, true); });
 
             KacGameArt.SkinRow(row);
         }
@@ -463,24 +451,13 @@ namespace KaCMultiplayer.Lobby
         /// </summary>
         private static void SetButtonText(GameObject row, string node, string caption)
         {
-            Transform t = row.transform.Find(node);
+            Transform t = Button(row, node);
             if (t == null) return;
 
             TextMeshProUGUI label = t.GetComponentInChildren<TextMeshProUGUI>();
             if (label == null) return;
 
             label.text = caption;
-
-            // "Break Alliance" is three times the width of "Ally" and the prefab's button is sized
-            // for the short one, so the long caption wrapped onto a second line and spilled out of
-            // the button. Shrinking the text to fit is the right way round: widening the button
-            // would push the rest of the row off the end again.
-            if (!label.enableAutoSizing)
-            {
-                label.fontSizeMax = label.fontSize;
-                label.fontSizeMin = 8f;
-                label.enableAutoSizing = true;
-            }
             label.enableWordWrapping = false;
             label.overflowMode = TextOverflowModes.Ellipsis;
         }
@@ -488,7 +465,7 @@ namespace KaCMultiplayer.Lobby
         /// <summary>Shows or hides one of a row's buttons.</summary>
         private static void SetActive(GameObject row, string node, bool visible)
         {
-            Transform t = row.transform.Find(node);
+            Transform t = Button(row, node);
             if (t != null) t.gameObject.SetActive(visible);
         }
 
@@ -517,9 +494,15 @@ namespace KaCMultiplayer.Lobby
             return kingdom + "  (" + persona + ")";
         }
 
+        /// <summary>A row button, from the row's Actions group.</summary>
+        private static Transform Button(GameObject row, string node)
+        {
+            return row.transform.Find("Actions/" + node);
+        }
+
         private static void Wire(GameObject row, string node, UnityEngine.Events.UnityAction action)
         {
-            Transform t = row.transform.Find(node);
+            Transform t = Button(row, node);
             Button b = t == null ? null : t.GetComponent<Button>();
             if (b == null)
             {

@@ -4,7 +4,7 @@ namespace KaCMultiplayer.Net.Messages
 {
     /// <summary>
     /// The host's greeting to a newly connected client: here is your id, and here is whether
-    /// we are loading a save.
+    /// your world and your kingdom are coming from us.
     ///
     /// The assigned id is carried explicitly rather than read from the transport. The client
     /// could ask Riptide for its own id and get the same answer, but this message is where
@@ -21,8 +21,16 @@ namespace KaCMultiplayer.Net.Messages
         /// <summary>The client id the host has assigned to the recipient.</summary>
         public ushort AssignedClientId;
 
-        /// <summary>True when the session is resuming a saved game rather than starting fresh.</summary>
-        public bool LoadingSave;
+        /// <summary>
+        /// True when the recipient's world and kingdom arrive from the host rather than being made
+        /// here: a saved game being resumed, or a game already in progress.
+        ///
+        /// It decides one thing and it decides it silently, so it is worth stating plainly: a
+        /// client told false goes to the name-and-banner screen and founds a NEW kingdom. That is
+        /// right for somebody joining a fresh lobby and wrong for everybody else, and it is what a
+        /// player rejoining a game in progress used to be told.
+        /// </summary>
+        public bool WorldComesFromHost;
 
         /// <summary>
         /// The host's mod version, so a guest on a different build is told (see
@@ -35,14 +43,14 @@ namespace KaCMultiplayer.Net.Messages
         public void Serialize(Message m)
         {
             m.AddUShort(AssignedClientId);
-            m.AddBool(LoadingSave);
+            m.AddBool(WorldComesFromHost);
             m.AddString(HostVersion ?? "");
         }
 
         public void Deserialize(Message m)
         {
             AssignedClientId = m.GetUShort();
-            LoadingSave = m.GetBool();
+            WorldComesFromHost = m.GetBool();
             HostVersion = m.UnreadBits > 0 ? m.GetString() : "";
         }
     }
