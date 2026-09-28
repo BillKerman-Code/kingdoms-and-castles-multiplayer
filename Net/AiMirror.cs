@@ -272,6 +272,11 @@ namespace KaCMultiplayer.Net
             return null;
         }
 
+        /// <summary>
+        /// Guest: makes one of an AI kingdom's buildings here, from the host's description of it,
+        /// the same way a player's building placed elsewhere is made. It goes into this machine's own
+        /// Player, as AI buildings do in vanilla.
+        /// </summary>
         private static Building Create(BuildingState s)
         {
             Building prefab = GameState.inst != null ? GameState.inst.GetPlaceableByUniqueName(s.UniqueName) : null;
@@ -314,6 +319,10 @@ namespace KaCMultiplayer.Net
                 if (b != null) RefreshFog(b, !fogInitialised.Contains(b.guid));
         }
 
+        /// <summary>
+        /// Shows or hides one mirrored AI building by this guest's own fog. The first time, replaces
+        /// the host's "seen" bit with this machine's own, since each player explores their own map.
+        /// </summary>
         private static void RefreshFog(Building building, bool initialiseLocalDiscovery)
         {
             if (building == null || FogOfWar.inst == null || BuildingVisibleMethod == null) return;
@@ -335,6 +344,7 @@ namespace KaCMultiplayer.Net
             catch (Exception ex) { NetLog.Error("refreshing AI building fog", ex); }
         }
 
+        /// <summary>The island under a position, or -1.</summary>
         private static int LandmassAt(Vector3 position)
         {
             try
@@ -345,6 +355,7 @@ namespace KaCMultiplayer.Net
             catch { return -1; }
         }
 
+        /// <summary>The banner number if this game has that livery, otherwise the first one.</summary>
         private static int ValidBanner(int banner)
         {
             try
@@ -382,6 +393,7 @@ namespace KaCMultiplayer.Net
             };
         }
 
+        /// <summary>The building's private production progress, read so it can travel with the building.</summary>
         private static float ReadResourceProgress(Building b)
         {
             if (ResourceProgressField == null) return 0f;

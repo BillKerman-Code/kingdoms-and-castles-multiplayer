@@ -101,11 +101,13 @@ namespace KaCMultiplayer.Net
             TryShowPendingBanner();
         }
 
+        /// <summary>Retries a host banner that arrived before this screen had a dragon panel to show it in.</summary>
         public static void Tick()
         {
             if (pendingBanner) TryShowPendingBanner();
         }
 
+        /// <summary>Shows the dragon banner the host asked for, if the dragon panel exists yet.</summary>
         private static void TryShowPendingBanner()
         {
 

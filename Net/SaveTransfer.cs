@@ -114,6 +114,7 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private static readonly HashSet<long> queued = new HashSet<long>();
 
+        /// <summary>One number for a (client, chunk) pair, for the queued set.</summary>
         private static long QueueKey(ushort clientId, int chunkId)
         {
             return ((long)clientId << 32) | (uint)chunkId;

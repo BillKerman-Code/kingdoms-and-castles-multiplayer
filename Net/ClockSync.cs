@@ -198,6 +198,7 @@ namespace KaCMultiplayer.Net
                 : yearStart + summer + (winter - seasonTime);
         }
 
+        /// <summary>Sets this guest's calendar to the host's outright, for a gap too big to be drift.</summary>
         private static void SetStraight(ClockSyncMessage m, Weather w, Player p, double gap)
         {
             NetLog.Warn("clock: " + (gap > 0 ? "behind" : "ahead of") + " the host by "
@@ -210,6 +211,7 @@ namespace KaCMultiplayer.Net
             pendingAdvance = 0f;
         }
 
+        /// <summary>Logs how far behind or ahead this guest is, at most every 30 seconds.</summary>
         private static void Report(string how, double gameSeconds, ClockSyncMessage m, Player p, Weather w)
         {
             if (gameSeconds < 10.0 || Time.unscaledTime < nextLogAt) return;
@@ -220,6 +222,10 @@ namespace KaCMultiplayer.Net
                         + " there); " + (how == "behind" ? "running forward" : "holding this season longer"));
         }
 
+        /// <summary>
+        /// Keeps the game running while its window is not in front, for the length of a session, so
+        /// alt-tabbing does not stop this machine's calendar and networking. Put back at Reset.
+        /// </summary>
         private static void KeepRunningInBackground()
         {
             if (backgroundBefore != null) return;

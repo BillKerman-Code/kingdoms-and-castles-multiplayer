@@ -3,12 +3,20 @@ using UnityEngine;
 
 namespace KaCMultiplayer.LoadSaveOverrides
 {
+    /// <summary>
+    /// Repaints this player's kingdom a few times just after a multiplayer save loads.
+    ///
+    /// A guest's flag colours, building materials and villager meshes can come back wrong after a
+    /// load, because they are set up before the kingdom knows its banner. A few passes, spaced out,
+    /// put them right once everything they depend on exists.
+    /// </summary>
     internal static class PostLoadVisualRepair
     {
         private static int remaining;
         private static int nextTick;
         private static bool rebuiltVillagers;
 
+        /// <summary>Called when a save has finished unpacking: queues four repair passes.</summary>
         public static void Schedule()
         {
             remaining = 4;
@@ -16,12 +24,17 @@ namespace KaCMultiplayer.LoadSaveOverrides
             rebuiltVillagers = false;
         }
 
+        /// <summary>Cancels any passes still queued, for a session ending.</summary>
         public static void Reset()
         {
             remaining = 0;
             rebuiltVillagers = false;
         }
 
+        /// <summary>
+        /// Runs the next queued pass when it is due: banner, building materials, build menu,
+        /// visibility, and from the third pass on the villager meshes once.
+        /// </summary>
         public static void Tick()
         {
             if (remaining <= 0 || Main.FixedUpdateInterval < nextTick) return;
@@ -84,6 +97,10 @@ namespace KaCMultiplayer.LoadSaveOverrides
             catch (Exception ex) { Main.LogEx("post-load guest visual repair", ex); }
         }
 
+        /// <summary>
+        /// Rebuilds every villager's drawn mesh from scratch, so none are left invisible or in the
+        /// wrong colours after the load. Returns false if the villager system is not ready yet.
+        /// </summary>
         private static bool TryRebuildVillagerInstances(out int count)
         {
             count = 0;

@@ -2599,6 +2599,10 @@ namespace KaCMultiplayer
             return done;
         }
 
+        /// <summary>
+        /// After a load, repaints every kingdom's soldiers and ships in its own colours. Returns how
+        /// many kingdoms were done.
+        /// </summary>
         private static int RefreshUnitMaterials()
         {
             int done = 0;
@@ -3454,6 +3458,10 @@ namespace KaCMultiplayer
             /// </summary>
             private static MethodInfo updateMaterialFor;
 
+            /// <summary>
+            /// Gives one team's units their colours, once that team has a banner. Public so the post-load
+            /// repaint can call it for every kingdom.
+            /// </summary>
             public static void EnsureUnitsAreVisible(int teamId)
             {
                 try
@@ -4842,6 +4850,7 @@ namespace KaCMultiplayer
             }
         }
 
+        /// <summary>This machine's own team, or the fallback before it has one.</summary>
         private static int LocalTeamOr(int fallback)
         {
             return (Player.inst != null && Player.inst.PlayerLandmassOwner != null)
@@ -5895,6 +5904,10 @@ namespace KaCMultiplayer
                 }
             }
 
+            /// <summary>
+            /// The first method outside this hook and Harmony that asked to close the building, for the
+            /// log and for telling AI code apart from a player's click.
+            /// </summary>
             private static string Caller(out Type type)
             {
                 type = null;
@@ -8898,6 +8911,11 @@ namespace KaCMultiplayer
             _raidPlayerBeforeYear = null;
         }
 
+        /// <summary>
+        /// Only the host runs the Viking raid system in multiplayer, so a raid is planned once and
+        /// not differently on every machine. Guests see its boats through RaiderSync. Single player
+        /// runs it as vanilla.
+        /// </summary>
         [HarmonyPatch(typeof(RaiderSystem), "Update")]
         public class RaiderUpdateAuthorityHook
         {
@@ -8907,6 +8925,7 @@ namespace KaCMultiplayer
             }
         }
 
+        /// <summary>A guest does not simulate Viking transports: they move where the host says (RaiderSync).</summary>
         [HarmonyPatch(typeof(ShipBase), "Tick")]
         public class RaiderShipTickAuthorityHook
         {

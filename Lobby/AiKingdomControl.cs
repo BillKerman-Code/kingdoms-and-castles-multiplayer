@@ -60,6 +60,10 @@ namespace KaCMultiplayer.Lobby
         private static readonly Color cLabel = new Color(0.95f, 0.75f, 0.35f, 1f);
         private static readonly Color cButton = new Color(0.16f, 0.22f, 0.30f, 1f);
 
+        /// <summary>
+        /// Builds the AI kingdom strip under the lobby's player list, once, styled like the Start
+        /// button it is given. Built in code because the lobby prefab has no AI controls.
+        /// </summary>
         public static void EnsureBuilt(Button styleSource)
         {
             if (root != null) return;
@@ -284,6 +288,10 @@ namespace KaCMultiplayer.Lobby
             return current;
         }
 
+        /// <summary>
+        /// How many rival codes this game can use: the smaller of its livery sets and its AI name pool,
+        /// since one code picks both a banner and a name.
+        /// </summary>
         internal static int CodeLimit()
         {
             int limit = (World.inst != null && World.inst.liverySets != null) ? World.inst.liverySets.Count : 0;
@@ -292,6 +300,7 @@ namespace KaCMultiplayer.Lobby
             return limit;
         }
 
+        /// <summary>The name an AI slot shows: the one the host typed, or the game's own for its rival code.</summary>
         internal static string NameFor(int slot, int code)
         {
             string custom = LobbySettings.Current.AiNames[slot];
@@ -308,6 +317,7 @@ namespace KaCMultiplayer.Lobby
             return "AI Kingdom " + (slot + 1);
         }
 
+        /// <summary>The banner for a rival code, or null if this game has no such livery.</summary>
         internal static Texture BannerFor(int code)
         {
             var sets = World.inst == null ? null : World.inst.liverySets;
@@ -358,6 +368,7 @@ namespace KaCMultiplayer.Lobby
             }
         }
 
+        /// <summary>An empty horizontal row for the lobby controls.</summary>
         internal static GameObject NewRow(string name, Transform parent)
         {
             GameObject row = new GameObject(name);
@@ -374,6 +385,7 @@ namespace KaCMultiplayer.Lobby
             return row;
         }
 
+        /// <summary>A text label in the lobby's own font and size.</summary>
         internal static TextMeshProUGUI NewLabel(string name, Transform parent, string text, Color color)
         {
             GameObject obj = new GameObject(name);
@@ -391,6 +403,7 @@ namespace KaCMultiplayer.Lobby
             return tmp;
         }
 
+        /// <summary>A button with the lobby's own art, copied from the Start button when there is one.</summary>
         internal static Button NewButton(string name, Transform parent, string label, float width)
         {
             GameObject obj = new GameObject(name);
@@ -565,6 +578,7 @@ namespace KaCMultiplayer.Lobby
             catch (Exception e) { Main.helper.Log("AI row build error: " + e.Message); }
         }
 
+        /// <summary>Host: moves this AI's difficulty up or down one level, wrapping round.</summary>
         private void Step(int delta)
         {
             LobbySettings s = LobbySettings.Current;
@@ -573,6 +587,10 @@ namespace KaCMultiplayer.Lobby
             Refresh(true);
         }
 
+        /// <summary>
+        /// Shows this AI slot's name, banner and difficulty as LobbySettings has them. Only the host
+        /// can click; a guest sees what the host sent.
+        /// </summary>
         public void Refresh(bool interactable)
         {
             try
@@ -625,6 +643,7 @@ namespace KaCMultiplayer.Lobby
         private static readonly Color cPanel = new Color(0.10f, 0.14f, 0.20f, 0.97f);
         private static readonly Color cTitle = new Color(0.95f, 0.75f, 0.35f, 1f);
 
+        /// <summary>Host: opens the editor for one AI slot's name and flag.</summary>
         public static void Open(int slot)
         {
             if (!NetRouter.IsServer) return;
@@ -642,22 +661,26 @@ namespace KaCMultiplayer.Lobby
             root.transform.SetAsLastSibling();
         }
 
+        /// <summary>Closes the editor.</summary>
         public static void Close()
         {
             editSlot = -1;
             if (root != null) root.SetActive(false);
         }
 
+        /// <summary>Closes the editor if the slot it was editing has just been removed.</summary>
         public static void CloseIfSlotGone(int count)
         {
             if (editSlot >= count) Close();
         }
 
+        /// <summary>Redraws the editor if it is open, after the lobby settings changed.</summary>
         public static void RefreshIfOpen()
         {
             if (root != null && root.activeSelf && editSlot >= 0) Refresh();
         }
 
+        /// <summary>Shows the edited slot's current name and flag.</summary>
         private static void Refresh()
         {
             if (editSlot < 0 || editSlot >= LobbySettings.Current.AiKingdomCount) { Close(); return; }
@@ -675,6 +698,7 @@ namespace KaCMultiplayer.Lobby
             if (placeholder != null) placeholder.text = AiKingdomControl.DefaultNameFor(editSlot, code);
         }
 
+        /// <summary>Steps the edited slot to the next flag no other AI is using.</summary>
         private static void StepFlag(int direction)
         {
             if (editSlot < 0) return;
@@ -682,6 +706,7 @@ namespace KaCMultiplayer.Lobby
             AiKingdomControl.Refresh(true);
         }
 
+        /// <summary>Stores the name the host typed, on one line and no longer than the lobby allows.</summary>
         private static void OnNameChanged(string text)
         {
             if (editSlot < 0) return;
@@ -691,6 +716,7 @@ namespace KaCMultiplayer.Lobby
             AiKingdomControl.Refresh(true);
         }
 
+        /// <summary>Builds the editor window over the lobby, once.</summary>
         private static void EnsureBuilt()
         {
             if (root != null) return;
@@ -809,6 +835,7 @@ namespace KaCMultiplayer.Lobby
             }
         }
 
+        /// <summary>One row of the editor, a fixed height.</summary>
         private static GameObject EditorRow(string name, Transform parent, float height)
         {
             GameObject row = AiKingdomControl.NewRow(name, parent);
@@ -817,6 +844,7 @@ namespace KaCMultiplayer.Lobby
             return row;
         }
 
+        /// <summary>A fixed-width caption at the start of an editor row.</summary>
         private static void FixedLabel(Transform parent, string text)
         {
             TextMeshProUGUI label = AiKingdomControl.NewLabel(text + "Label", parent, text, AiKingdomControl.cText);
@@ -826,6 +854,7 @@ namespace KaCMultiplayer.Lobby
             le.minWidth = 70f;
         }
 
+        /// <summary>Empty space that pushes the rest of a row to the right.</summary>
         private static void Spacer(Transform parent)
         {
             GameObject spacer = new GameObject("Spacer");
@@ -834,6 +863,7 @@ namespace KaCMultiplayer.Lobby
             spacer.AddComponent<LayoutElement>().flexibleWidth = 1f;
         }
 
+        /// <summary>Fixes a layout element's height.</summary>
         private static void SetHeight(GameObject obj, float height)
         {
             LayoutElement le = obj.GetComponent<LayoutElement>();

@@ -1712,6 +1712,7 @@ namespace KaCMultiplayer.Net
                 KaCMultiplayer.Combat.CombatSync.ApplyShipHealth(m);
         }
 
+        /// <summary>Guest: the host's foreign merchant set sail; see MerchantSync.</summary>
         private static void ApplyMerchantSpawn(MerchantSpawnMessage m)
         {
             MerchantSync.Apply(m);

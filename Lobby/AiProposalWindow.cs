@@ -31,6 +31,10 @@ namespace KaCMultiplayer.Lobby
         private static readonly Queue<AiProposalMessage> waiting = new Queue<AiProposalMessage>();
         private static AiProposalMessage current;
 
+        /// <summary>
+        /// Guest: an AI kingdom has proposed something (a demand, a gift, peace). Queued, so two
+        /// arriving together are shown one after the other instead of one hiding the other.
+        /// </summary>
         public static void Enqueue(AiProposalMessage m)
         {
             if (m == null) return;
@@ -38,6 +42,7 @@ namespace KaCMultiplayer.Lobby
             if (current == null) ShowNext();
         }
 
+        /// <summary>Shows the next queued proposal, or hides the window when there are none.</summary>
         private static void ShowNext()
         {
             current = waiting.Count > 0 ? waiting.Dequeue() : null;
@@ -65,6 +70,10 @@ namespace KaCMultiplayer.Lobby
             catch (System.Exception e) { NetLog.Error("showing an AI proposal", e); }
         }
 
+        /// <summary>
+        /// Sends this player's answer to the host, which runs the AI. Gold the AI demanded leaves this
+        /// kingdom's treasury here first, because only this machine holds it for real.
+        /// </summary>
         private static void Answer(bool accept)
         {
             AiProposalMessage p = current;
@@ -97,6 +106,7 @@ namespace KaCMultiplayer.Lobby
             acceptButton = refuseButton = null;
         }
 
+        /// <summary>Builds the proposal window once, on the game's own dialog art when it can be found.</summary>
         private static void EnsureBuilt()
         {
             if (canvas != null) return;
@@ -135,6 +145,7 @@ namespace KaCMultiplayer.Lobby
             canvas.SetActive(false);
         }
 
+        /// <summary>A plain version of the window, for when the game's dialog art cannot be found.</summary>
         private static void BuildFallback()
         {
             GameObject panel = new GameObject("Panel", typeof(RectTransform), typeof(Image));
@@ -151,6 +162,7 @@ namespace KaCMultiplayer.Lobby
             refuseButton = Button(panel.transform, new Vector2(130, -95));
         }
 
+        /// <summary>A text label placed in the fallback window.</summary>
         private static TextMeshProUGUI Label(Transform parent, Vector2 pos, Vector2 size, float fontSize)
         {
             GameObject go = new GameObject("Label", typeof(RectTransform));
@@ -165,6 +177,7 @@ namespace KaCMultiplayer.Lobby
             return t;
         }
 
+        /// <summary>A button placed in the fallback window.</summary>
         private static Button Button(Transform parent, Vector2 pos)
         {
             GameObject go = new GameObject("Button", typeof(RectTransform), typeof(Image));

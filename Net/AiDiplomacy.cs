@@ -132,6 +132,7 @@ namespace KaCMultiplayer.Net
             return !NetRouter.IsServer && remote.ContainsKey(team);
         }
 
+        /// <summary>The AI kingdom with this team, on the host, or null.</summary>
         public static AIKingdom KingdomFor(int team)
         {
             AIBrainsContainer brains = AIBrainsContainer.inst;
@@ -247,11 +248,13 @@ namespace KaCMultiplayer.Net
             return lo.standings != null && lo.standings.TryGetValue(team, out s) ? (int)s : 2;
         }
 
+        /// <summary>An AI's opinion level as the words the game uses for it.</summary>
         public static string StandingName(int standing)
         {
             return StandingNames[Mathf.Clamp(standing, 0, StandingNames.Length - 1)];
         }
 
+        /// <summary>Moves an AI's opinion of one kingdom by some points, through the game's own method.</summary>
         private static void Modify(AIKingdom k, int team, int points)
         {
             try
@@ -274,12 +277,14 @@ namespace KaCMultiplayer.Net
             catch (Exception e) { NetLog.Error("capping an AI standing", e); }
         }
 
+        /// <summary>Whether the game would have this AI give in to peace now.</summary>
         private static bool ShouldSurrender(AIKingdom k)
         {
             try { return Reflect() && shouldSurrender != null && (bool)shouldSurrender.Invoke(k, null); }
             catch { return false; }
         }
 
+        /// <summary>Finds the game's private opinion methods, once. False if any is missing.</summary>
         private static bool Reflect()
         {
             if (!reflected)
@@ -524,6 +529,10 @@ namespace KaCMultiplayer.Net
                      + "). Its opinion of you is now " + StandingName(Standing(k, me)) + ".";
         }
 
+        /// <summary>
+        /// Whether an AI pays a tribute demand, by the game's own rules: it pays when it likes you or
+        /// fears you, and at the lowest opinion it answers a demand with war.
+        /// </summary>
         private static void DecideTribute(AIKingdom k, int me, int aiTeam, string name,
                                           FreeResourceType res, int amount, Outcome o)
         {
@@ -765,6 +774,10 @@ namespace KaCMultiplayer.Net
             catch (Exception e) { NetLog.Error("AI initiatives", e); }
         }
 
+        /// <summary>
+        /// Host, each season, for one AI and one guest: counts seasons at the lowest opinion, and runs
+        /// the warnings, war, demands and gifts the game's envoys would bring to the host.
+        /// </summary>
         private static void SeasonFor(AIKingdom k, int ai, int h, bool active)
         {
             long key = TeamPair.Key(ai, h);
@@ -885,6 +898,7 @@ namespace KaCMultiplayer.Net
             SendToHuman(h, ai, outcome);
         }
 
+        /// <summary>The AI declares war on a player, everywhere, and tells them.</summary>
         private static void DeclareWarOn(AIKingdom k, int ai, int h, string message)
         {
             Main.HostPresetRelation(ai, h, World.Relations.Enemy);
@@ -892,6 +906,7 @@ namespace KaCMultiplayer.Net
             Notify(h, ai, NameFor(ai), message);
         }
 
+        /// <summary>How many villagers live on an AI kingdom's islands; the game waits for 75 before diplomacy.</summary>
         private static int VillagersOf(AIKingdom k)
         {
             int n = 0;
@@ -932,6 +947,7 @@ namespace KaCMultiplayer.Net
             NetLog.Info("AI initiative: " + NameFor(ai) + " -> team " + h + ": " + kind + " " + amount);
         }
 
+        /// <summary>Whether this AI already has a proposal waiting on this player.</summary>
         private static bool HasOpenProposal(int ai, int h)
         {
             foreach (Proposal p in proposals.Values)
@@ -1063,6 +1079,7 @@ namespace KaCMultiplayer.Net
             SendToHuman(human, ai, new Outcome { Title = title, Body = body });
         }
 
+        /// <summary>Sends an outcome to the machine that plays this team, if anyone does.</summary>
         private static void SendToHuman(int human, int ai, Outcome o)
         {
             ushort client;
@@ -1070,6 +1087,7 @@ namespace KaCMultiplayer.Net
             SendResult(client, ai, o);
         }
 
+        /// <summary>Sends an outcome to one guest, with anything to go into that guest's stores.</summary>
         private static void SendResult(ushort client, int ai, Outcome o)
         {
             var res = new List<int>();
@@ -1090,6 +1108,7 @@ namespace KaCMultiplayer.Net
             }, client);
         }
 
+        /// <summary>The connection that plays this team, if they are here.</summary>
         private static bool ClientOf(int team, out ushort client)
         {
             client = 0;
@@ -1099,12 +1118,14 @@ namespace KaCMultiplayer.Net
             return client != 0;
         }
 
+        /// <summary>A counter's value, 0 if it has none yet.</summary>
         private static int Get(Dictionary<long, int> d, long key)
         {
             int v;
             return d.TryGetValue(key, out v) ? v : 0;
         }
 
+        /// <summary>Tells this machine's player an AI's answer, in a popup and the log.</summary>
         private static void Tell(string title, string body)
         {
             NetLog.Info("AI diplomacy: " + body);

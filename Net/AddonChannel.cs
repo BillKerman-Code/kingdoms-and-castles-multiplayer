@@ -59,6 +59,10 @@ namespace KaCMultiplayer.Net
             m.FromHost = context.SenderId == 0 || context.SenderId == NetRouter.LocalClientId;
         }
 
+        /// <summary>
+        /// Hands a companion message to everyone listening on its channel, with who sent it. Our own
+        /// message coming back is dropped, and one listener throwing cannot stop the others.
+        /// </summary>
         internal static void Dispatch(AddonMessage m)
         {
             if (m == null) return;

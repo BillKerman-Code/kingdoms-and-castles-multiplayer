@@ -32,11 +32,13 @@ namespace KaCMultiplayer.Net.Messages
             GetResources(m, out SellWheat,out SellTree,out SellStone,out SellCharcoal,out SellGold,out SellIron,out SellTools,out SellArmament,out SellFish,out SellApple,out SellPork);
         }
 
+        /// <summary>Writes the eleven tradeable resources in a fixed order.</summary>
         private static void AddResources(Message m, params int[] values)
         {
             for (int i=0; i<values.Length; i++) m.AddInt(values[i]);
         }
 
+        /// <summary>Reads them back in the same order.</summary>
         private static void GetResources(Message m, out int wheat,out int tree,out int stone,out int charcoal,out int gold,out int iron,out int tools,out int armament,out int fish,out int apple,out int pork)
         {
             wheat=m.GetInt(); tree=m.GetInt(); stone=m.GetInt(); charcoal=m.GetInt(); gold=m.GetInt(); iron=m.GetInt();

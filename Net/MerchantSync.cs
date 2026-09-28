@@ -8,6 +8,10 @@ namespace KaCMultiplayer.Net
     /// <summary>Creates foreign merchants once on the host and mirrors them to every guest.</summary>
     public static class MerchantSync
     {
+        /// <summary>
+        /// Host: tells every guest a foreign merchant has set sail, with its cargo, prices and dock.
+        /// Only the host creates merchants, so every machine sees the same ship.
+        /// </summary>
         public static void Publish(MerchantShip ship, Building dock)
         {
             if (!NetRouter.IsServer || ship == null || dock == null || NetApply.InProgress) return;
@@ -29,6 +33,10 @@ namespace KaCMultiplayer.Net
             NetLog.Info("merchant spawn: " + ship.guid + " -> dock " + dock.guid);
         }
 
+        /// <summary>
+        /// Guest: makes the host's merchant ship here, once, sailing to the same dock with the same
+        /// cargo and prices.
+        /// </summary>
         public static void Apply(MerchantSpawnMessage m)
         {
             if (NetRouter.IsServer || m == null || ShipSystem.inst == null) return;
@@ -67,6 +75,7 @@ namespace KaCMultiplayer.Net
             catch (Exception ex) { NetLog.Error("merchant spawn", ex); }
         }
 
+        /// <summary>Writes a set of resource amounts into the message: 0 is the hold, 1 buy prices, 2 sell prices.</summary>
         private static void Put(ResourceAmount r, MerchantSpawnMessage m, int set)
         {
             int wheat=r.Get(FreeResourceType.Wheat), tree=r.Get(FreeResourceType.Tree), stone=r.Get(FreeResourceType.Stone);
@@ -78,6 +87,7 @@ namespace KaCMultiplayer.Net
             else { m.SellWheat=wheat;m.SellTree=tree;m.SellStone=stone;m.SellCharcoal=charcoal;m.SellGold=gold;m.SellIron=iron;m.SellTools=tools;m.SellArmament=arms;m.SellFish=fish;m.SellApple=apple;m.SellPork=pork; }
         }
 
+        /// <summary>Reads one of those sets back out of the message.</summary>
         private static ResourceAmount Get(MerchantSpawnMessage m, int set)
         {
             ResourceAmount r = new ResourceAmount();

@@ -15,8 +15,13 @@ namespace KaCMultiplayer.Net
         private static readonly HashSet<Guid> live = new HashSet<Guid>();
         private static readonly List<Guid> stale = new List<Guid>();
 
+        /// <summary>Forgets every mirrored boat, for a session ending.</summary>
         public static void Reset() { tick=0; hostHadBoats=false; mirrored.Clear(); }
 
+        /// <summary>
+        /// Host: sends where every Viking transport is, a few times a second. One last empty message
+        /// after the final boat goes, so guests remove theirs too.
+        /// </summary>
         public static void Tick()
         {
             if (!Main.RaidsEnabled || !NetRouter.IsServer || ShipSystem.inst == null) return;
@@ -33,6 +38,11 @@ namespace KaCMultiplayer.Net
             hostHadBoats=m.Boats.Count>0;
         }
 
+        /// <summary>
+        /// Guest: moves each Viking transport to where the host has it, makes any it does not have
+        /// yet, and removes the ones the host no longer has. The host runs the raid, so a guest only
+        /// ever shows its boats.
+        /// </summary>
         public static void Apply(RaiderBoatsMessage m)
         {
             if(NetRouter.IsServer || m==null || ShipSystem.inst==null || RaiderSystem.inst==null) return;
@@ -66,6 +76,7 @@ namespace KaCMultiplayer.Net
             }
         }
 
+        /// <summary>The ship with this id in this machine's ship list, or null.</summary>
         private static ShipBase Find(Guid id)
         {
             for(int i=0;i<ShipSystem.inst.ships.Count;i++)
@@ -73,6 +84,10 @@ namespace KaCMultiplayer.Net
             return null;
         }
 
+        /// <summary>
+        /// Whether this machine should simulate a ship. A guest leaves Viking transports to the host,
+        /// whose positions arrive in Apply; everything else, and single player, runs as vanilla.
+        /// </summary>
         public static bool ShouldTickShip(ShipBase ship)
         {
             if(!Main.RaidsEnabled || !NetRouter.IsConnected || NetRouter.IsServer || ship==null) return true;

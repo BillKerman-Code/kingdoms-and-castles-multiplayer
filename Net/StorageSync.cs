@@ -6,11 +6,25 @@ using KaCMultiplayer.Net.Messages;
 
 namespace KaCMultiplayer.Net
 {
+    /// <summary>
+    /// Keeps what is inside a player's warehouses and granaries the same on every machine.
+    ///
+    /// Only the owner's game puts villagers to work in its own kingdom, so on everyone else's
+    /// machine those stores never fill or empty by themselves. The host packs its copy of a guest's
+    /// kingdom when that guest reconnects, so a stale copy there used to hand the guest back empty
+    /// stores. The owner now sends each public store's contents whenever they change, and every other
+    /// machine sets its copy to match.
+    /// </summary>
     public static class StorageSync
     {
         private static readonly Dictionary<string, string> last = new Dictionary<string, string>();
+        /// <summary>Forgets what was last sent, so a new session starts by sending every store.</summary>
         public static void Reset() { last.Clear(); }
 
+        /// <summary>
+        /// Owner, about once a second: sends each of this kingdom's public stores whose contents
+        /// changed since last time. Only our own buildings, because only our copy of them is real.
+        /// </summary>
         public static void Tick()
         {
             SessionPlayer session;
@@ -41,6 +55,10 @@ namespace KaCMultiplayer.Net
             }
         }
 
+        /// <summary>
+        /// Everyone else: sets our copy of the sender's store to what the sender says it holds. Refused
+        /// unless the building really is the sender's, so nobody can rewrite another kingdom's stores.
+        /// </summary>
         public static void Apply(StorageSnapshotMessage m)
         {
             SessionPlayer sender;
@@ -60,6 +78,7 @@ namespace KaCMultiplayer.Net
             }
         }
 
+        /// <summary>Copies one store's contents into a message.</summary>
         private static StorageSnapshotMessage Pack(Guid id,byte component,ResourceAmount r)
         {
             return new StorageSnapshotMessage { Building=id,Component=component,
@@ -69,6 +88,7 @@ namespace KaCMultiplayer.Net
                 Apple=r.Get(FreeResourceType.Apples),Pork=r.Get(FreeResourceType.Pork) };
         }
 
+        /// <summary>Reads a store's contents back out of a message.</summary>
         private static ResourceAmount Unpack(StorageSnapshotMessage m)
         {
             ResourceAmount r=new ResourceAmount();
@@ -78,6 +98,7 @@ namespace KaCMultiplayer.Net
             r.Set(FreeResourceType.Apples,m.Apple); r.Set(FreeResourceType.Pork,m.Pork); return r;
         }
 
+        /// <summary>The contents as one comparable string, so an unchanged store is not sent again.</summary>
         private static string Signature(StorageSnapshotMessage m)
         {
             return m.Wheat+","+m.Tree+","+m.Stone+","+m.Charcoal+","+m.Gold+","+m.Iron+","+m.Tools+","+

@@ -137,6 +137,10 @@ namespace KaCMultiplayer.Lobby
             catch (Exception e) { NetLog.Error("skinning a diplomacy row", e); }
         }
 
+        /// <summary>
+        /// Puts the game's button art on every button under a window, and its fonts on the text, the
+        /// biggest text getting the title font.
+        /// </summary>
         private static void SkinButtonsAndText(GameObject root, bool recolourText)
         {
             foreach (Button b in root.GetComponentsInChildren<Button>(true))
@@ -165,6 +169,7 @@ namespace KaCMultiplayer.Lobby
             }
         }
 
+        /// <summary>Puts the game's button art and font on one button.</summary>
         private static void SkinButton(Button b)
         {
             if (b == null) return;
@@ -186,6 +191,7 @@ namespace KaCMultiplayer.Lobby
             }
         }
 
+        /// <summary>Sets an image's sprite, how it is drawn, and its colour.</summary>
         private static void Paint(Image img, Sprite sprite, Image.Type type, Color color)
         {
             img.sprite = sprite;
@@ -193,6 +199,7 @@ namespace KaCMultiplayer.Lobby
             img.color = color;
         }
 
+        /// <summary>How bright a colour looks, 0 to 1, to tell light text from dark.</summary>
         private static float Luminance(Color c)
         {
             return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b;
@@ -246,6 +253,7 @@ namespace KaCMultiplayer.Lobby
             return "<sprite name=" + name + ">";
         }
 
+        /// <summary>The name of the game's own sprite for a resource icon.</summary>
         private static string IconName(FreeResourceType type)
         {
             switch (type)
@@ -265,12 +273,14 @@ namespace KaCMultiplayer.Lobby
             }
         }
 
+        /// <summary>Whether the game's sprite sheet has an icon of this name.</summary>
         private static bool HasIcon(TMP_SpriteAsset sheet, string name)
         {
             try { return sheet != null && sheet.GetSpriteIndexFromName(name) >= 0; }
             catch { return false; }
         }
 
+        /// <summary>Finds the game's own Hall of Diplomacy art and fonts once, from its diplomacy window.</summary>
         private static void EnsureFound()
         {
             if (searched) return;
@@ -382,6 +392,7 @@ namespace KaCMultiplayer.Lobby
             return best;
         }
 
+        /// <summary>A sprite's name for the log, or a dash for none.</summary>
         private static string Name(Sprite s)
         {
             return s != null ? s.name : "-";
