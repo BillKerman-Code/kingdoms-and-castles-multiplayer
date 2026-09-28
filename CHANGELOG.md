@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.15.6
+## 0.16.0
 
 AI kingdoms, by Bill Kerman:
 - AI kingdoms in multiplayer. The host adds them in the lobby with "Add AI", sets each one's
