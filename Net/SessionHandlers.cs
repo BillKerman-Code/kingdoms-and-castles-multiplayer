@@ -27,6 +27,57 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private const int SaveChunkBytes = 900;
 
+        /// <summary>Addon-channel name the version report travels on (see WarnIfVersionsDiffer).</summary>
+        internal const string VersionChannel = "kacmp.version";
+
+        /// <summary>
+        /// Guest: says so, on both screens, when this build is not the host's. Builds that differ
+        /// read some messages differently -- formats have changed from one build to the next --
+        /// and the symptoms (a join that loads and then drops, a kingdom that is not recognised)
+        /// look like anything but a version problem. Not a refusal: a warning, and a line in both
+        /// logs.
+        ///
+        /// The host hears about it over the companion channel (AddonChannel), which needs no
+        /// message of its own and which an older host simply ignores.
+        /// </summary>
+        private static void WarnIfVersionsDiffer(string hostVersion)
+        {
+            try
+            {
+                string mine = Main.ModVersion;
+                AddonChannel.Send(VersionChannel, mine);
+
+                if (string.IsNullOrEmpty(hostVersion) || hostVersion == mine) return;
+
+                NetLog.Warn("version mismatch: host is on " + hostVersion + ", this machine on " + mine);
+                ModalDialog.ShowWhenVisible("Different mod versions",
+                    "The host is running Kingdoms and Castles Multiplayer " + hostVersion +
+                    " and you are running " + mine + ".\n\nThings may go wrong until you are both on " +
+                    "the same version. Update through the Workshop and restart the game.");
+            }
+            catch (Exception e) { NetLog.Error("comparing mod versions", e); }
+        }
+
+        /// <summary>Host: a guest reported its build (see WarnIfVersionsDiffer).</summary>
+        internal static void OnGuestVersion(int senderTeam, bool fromHost, string version)
+        {
+            if (!NetRouter.IsServer || string.IsNullOrEmpty(version)) return;
+            if (version == Main.ModVersion) return;
+
+            string who = "a player";
+            try
+            {
+                SessionPlayer p = NetPlayers.ByTeam(senderTeam);
+                if (p != null && !string.IsNullOrEmpty(p.name)) who = p.name;
+            }
+            catch { }
+
+            NetLog.Warn("version mismatch: " + who + " is on " + version + ", this host on " + Main.ModVersion);
+            ModalDialog.ShowWhenVisible("Different mod versions",
+                who + " is running Kingdoms and Castles Multiplayer " + version + " and you are running " +
+                Main.ModVersion + ".\n\nThings may go wrong until you are both on the same version.");
+        }
+
         /// <summary>
         /// The host has accepted us. Sets up the view, creates our player record, works out
         /// our team id, and moves to the right lobby screen.
@@ -34,10 +85,14 @@ namespace KaCMultiplayer.Net
         public static void OnHandshake(HandshakeMessage m)
         {
             NetLog.Info("handshake: assigned client id " + m.AssignedClientId +
-                        (m.WorldComesFromHost ? ", the world comes from the host" : ", fresh game"));
+                        (m.WorldComesFromHost ? ", the world comes from the host" : ", fresh game") +
+                        "; host on " + (string.IsNullOrEmpty(m.HostVersion) ? "an older build" : m.HostVersion) +
+                        ", this machine on " + Main.ModVersion);
 
             ModalDialog.Hide();
             Main.TransitionTo(MenuState.LobbyScreen);
+
+            WarnIfVersionsDiffer(m.HostVersion);
             SfxSystem.PlayUiSelect();
 
             // Presentation defaults for the lobby view.
@@ -124,9 +179,10 @@ namespace KaCMultiplayer.Net
             // Checked here rather than in the connection-approval callback because that runs before
             // the client has told us who they are; the steamId only arrives with this message.
             // Main.PlayHasBegun, not GameState.IsPlayMode(): a host with the pause or save menu
-            // open is not in play mode, and a stranger walking in at that moment used to be let
-            // through into a world with nothing in it for them.
-            if (Main.PlayHasBegun && !Main.kCPlayers.ContainsKey(m.SteamId))
+            // open is not in play mode, and a stranger walking in at that moment must still be
+            // refused. Keep the value for choosing and logging the transfer below.
+            bool inProgress = Main.PlayHasBegun;
+            if (inProgress && !Main.kCPlayers.ContainsKey(m.SteamId))
             {
                 NetLog.Info("refused " + m.Name + " (" + m.SteamId + "): game in progress and they have no kingdom here");
                 RefuseJoin(joiner, "Game in progress",
@@ -168,13 +224,17 @@ namespace KaCMultiplayer.Net
             // joining or reconnecting mid-game landed in a pristine world with no buildings, no
             // villagers and no kingdoms, with nothing logged to say so.
             //
-            // Main.PlayHasBegun rather than GameState.IsPlayMode() here too, and this is the one
-            // that cost a session. The host had the save or pause menu open while a kicked player
-            // rejoined, so play mode read false, the session looked like a lobby, and the rejoiner
-            // was handed a bare map seed instead of the world. Their machine regenerated the map
-            // and reset every kingdom: a brand new map and a fresh start on their side only, with
-            // the host still playing the real game.
-            if (Main.PlayHasBegun)
+            // It kept happening while the host had the ESC menu open, until this asked
+            // Main.PlayHasBegun rather than IsPlayMode. Logged, because the wrong choice is silent
+            // on the host and only shows up on the joiner's screen.
+            NetLog.Info("bringing " + m.Name + " up to date: "
+                        + (inProgress ? "game in progress, sending the running world"
+                           : SteamLobby.loadingSave ? "lobby with a save, sending the save"
+                           : "fresh lobby, sending the map seed")
+                        + " (play mode " + (GameState.inst != null && GameState.inst.IsPlayMode())
+                        + ", menu " + Main.menuState + ")");
+
+            if (inProgress)
                 QueueResumeTransfer(joiner, m.Name);
             else if (SteamLobby.loadingSave)
                 QueueSaveTransfer(joiner);
@@ -317,7 +377,7 @@ namespace KaCMultiplayer.Net
         /// declaration, including the gate rebake and dock policy, with no second implementation to
         /// keep in step.
         /// </summary>
-        private static void SendRelationsTo(ushort clientId)
+        public static void SendRelationsTo(ushort clientId)
         {
             try
             {
@@ -408,6 +468,7 @@ namespace KaCMultiplayer.Net
 
                 int total = (save.Length + SaveChunkBytes - 1) / SaveChunkBytes;
                 int sent = 0;
+                int alreadyQueued = 0;
 
                 for (int i = 0; i < chunkIds.Count; i++)
                 {
@@ -421,27 +482,27 @@ namespace KaCMultiplayer.Net
                     byte[] chunk = new byte[size];
                     Buffer.BlockCopy(save, offset, chunk, 0, size);
 
-                    SaveTransfer.Outgoing.Enqueue(new SaveTransfer.OutgoingChunk
+                    // Skipped when this chunk is still waiting to go out to them: a second copy
+                    // behind the first only delays everything after it (see SaveTransfer.queued).
+                    bool queuedNow = SaveTransfer.Enqueue(clientId, new SaveTransferMessage
                     {
-                        ClientId = clientId,
-                        Message = new SaveTransferMessage
-                        {
-                            ChunkId = id,
-                            TotalChunks = total,
-                            SaveSize = save.Length,
-                            Offset = offset,
-                            Resume = false,
-                            Data = chunk
-                        }
+                        ChunkId = id,
+                        TotalChunks = total,
+                        SaveSize = save.Length,
+                        Offset = offset,
+                        Resume = false,
+                        Data = chunk
                     });
-                    sent++;
+                    if (queuedNow) sent++;
+                    else alreadyQueued++;
                 }
 
                 // Worth a line every time. If these rounds keep coming, and keep being large, the
                 // send rate is losing more than the repair can recover and the rate is the thing to
                 // change. That is a judgement this log makes possible and guesswork otherwise.
                 NetLog.Info("save resend: client " + clientId + " asked for " + chunkIds.Count
-                            + " chunk(s), re-queued " + sent);
+                            + " chunk(s), queued " + sent
+                            + (alreadyQueued > 0 ? ", " + alreadyQueued + " already waiting to go" : ""));
             }
             catch (Exception e) { NetLog.Error("resending save chunks", e); }
         }
@@ -451,6 +512,10 @@ namespace KaCMultiplayer.Net
         {
             try
             {
+                // Sent as it is, uncompressed. Compressing needs System.IO.Compression, and the
+                // game's mod security check rejects anything under System.IO: the Workshop upload
+                // and the in-game compile both fail on it ("Compilation failed").
+
                 // Anything still queued for this client is from an attempt they have abandoned.
                 // They are starting again from chunk zero, so the remains only take up room in a
                 // queue everybody shares.
@@ -476,25 +541,22 @@ namespace KaCMultiplayer.Net
                     byte[] chunk = new byte[size];
                     Buffer.BlockCopy(save, offset, chunk, 0, size);
 
-                    SaveTransfer.Outgoing.Enqueue(new SaveTransfer.OutgoingChunk
+                    SaveTransfer.Enqueue(clientId, new SaveTransferMessage
                     {
-                        ClientId = clientId,
-                        Message = new SaveTransferMessage
-                        {
-                            ChunkId = i,
-                            TotalChunks = total,
-                            SaveSize = save.Length,
-                            Offset = offset,
-                            Resume = resume,
-                            Data = chunk
-                        }
+                        ChunkId = i,
+                        TotalChunks = total,
+                        SaveSize = save.Length,
+                        Offset = offset,
+                        Resume = resume,
+                        Data = chunk
                     });
 
                     offset += size;
                 }
 
                 NetLog.Info((resume ? "resume" : "save") + " transfer: " + total + " chunks ("
-                            + save.Length + " bytes) for client " + clientId + "; sent the first "
+                            + save.Length + " bytes) for client "
+                            + clientId + "; sent the first "
                             + firstWindow + ", they will ask for the rest");
             }
             catch (Exception ex) { NetLog.Error("save transfer queue", ex); }

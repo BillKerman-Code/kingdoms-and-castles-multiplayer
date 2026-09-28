@@ -180,6 +180,8 @@ namespace KaCMultiplayer.LoadSaveOverrides
                 bool isLocal = player.steamId == Main.PlayerSteamID;
                 bool haveTownName = TownNameUI.inst != null && !string.IsNullOrWhiteSpace(TownNameUI.inst.townName);
                 kingdomNames.Add(player.steamId, (isLocal && haveTownName) ? TownNameUI.inst.townName : player.kingdomName);
+
+                LogForeignStorageSnapshot(player, isLocal);
             }
 
             // The terrain and the things growing on it.
@@ -216,6 +218,65 @@ namespace KaCMultiplayer.LoadSaveOverrides
             KaCMultiplayer.Net.KingdomMirror.RequestFromEveryone();
 
             return this;
+        }
+
+        /// <summary>
+        /// Logs what this machine's own copy of a FOREIGN kingdom's job-worked storage buildings
+        /// actually holds, at the moment that kingdom gets packed into a save.
+        ///
+        /// DIAGNOSTIC ONLY -- writes nothing, changes nothing. Added while investigating a live
+        /// report (BlueJay, Discord, 2026-09-21) of a rejoining guest's materials resetting to
+        /// near-empty except Stone and Gold. The read root cause: this machine never (re)assigns a
+        /// job belonging to a kingdom that is not its own (see
+        /// <see cref="Main.JobUpdateAssignmentForeignHook"/>, and
+        /// <see cref="KaCMultiplayer.Net.PlayerRelations.TakeFrom"/>'s doc comment for the same gap
+        /// caught earlier the same night in a diplomacy trade), so a foreign kingdom's Stockpile,
+        /// Granary and similar buildings only ever hold what they had the last time this machine's
+        /// copy was accurate -- and <see cref="Main.PackLiveSnapshot"/> is exactly what a rejoining
+        /// player's own kingdom gets restored from when THIS machine is the host.
+        ///
+        /// This line is the fix's follow-up, not the fix: no correction is applied here (see
+        /// PackLiveSnapshot's own doc comment for why a live one was judged too risky to write
+        /// without a real session to test it against). What this buys instead is a checkable record
+        /// -- next time a player reports their materials came back wrong after reconnecting, this
+        /// line (search the log for "[SAVE] packed storage snapshot") says exactly what this
+        /// machine believed they had at the moment it packed their kingdom, which is either the
+        /// smoking gun or the thing that rules this theory out for good.
+        /// </summary>
+        private static void LogForeignStorageSnapshot(SessionPlayer player, bool isLocal)
+        {
+            if (isLocal || player == null || player.inst == null) return;
+
+            try
+            {
+                LandmassOwner owner = player.inst.PlayerLandmassOwner;
+                if (owner == null || owner.ownedLandMasses == null) return;
+
+                System.Text.StringBuilder sb = new System.Text.StringBuilder();
+                foreach (FreeResourceType type in KaCMultiplayer.Net.PlayerRelations.Demandable)
+                {
+                    if (type == FreeResourceType.Gold) continue;   // a plain int, never affected by this
+
+                    int total = 0;
+                    for (int i = 0; i < owner.ownedLandMasses.Count; i++)
+                    {
+                        var stores = FreeResourceManager.inst.GetResourceStorageListFor(type, owner.ownedLandMasses.data[i]);
+                        if (stores == null) continue;
+
+                        for (int s = 0; s < stores.Count; s++)
+                        {
+                            var store = stores.data[s];
+                            if (store == null || store.IsPrivate()) continue;
+                            total += store.StoredPublicResources().Get(type);
+                        }
+                    }
+
+                    sb.Append(KaCMultiplayer.Net.PlayerRelations.ResourceLabel(type)).Append('=').Append(total).Append(' ');
+                }
+
+                Main.helper.Log($"[SAVE] packed storage snapshot for {player.name} ({player.steamId}): {sb.ToString().TrimEnd()}");
+            }
+            catch (Exception e) { Main.LogEx("logging a foreign kingdom's packed storage snapshot", e); }
         }
 
         // Remove destroyed/null ship entries from ShipSystem before the vanilla ship pack runs.
@@ -391,6 +452,7 @@ namespace KaCMultiplayer.LoadSaveOverrides
             finally
             {
                 Unpacking = false;
+                PostLoadVisualRepair.Schedule();
             }
         }
 

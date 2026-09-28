@@ -43,6 +43,8 @@
         TimeScale = 1042,
         WeatherSet = 1043,
         HazardSpawn = 1044,
+        // The host's calendar (year, season, time left in it), so guests cannot drift. See Net/ClockSync.cs.
+        ClockSync = 1045,
         TreeFell = 1050,
         TreeShake = 1051,
         TreeGrow = 1052,
@@ -64,6 +66,7 @@
         TaxRate = 1081,
         KingdomMirror = 1082,
         KingdomMirrorRequest = 1083,
+        StorageSnapshot = 1084,
 
         // 1090-1109  population
         VillagerAdd = 1090,
@@ -86,12 +89,20 @@
         /// <summary>What a kingdom charges for its exports. See Trade/ExportPrices.cs.</summary>
         ExportPrices = 1114,
 
+        /// <summary>A host-created foreign merchant, including its cargo and destination.</summary>
+        MerchantSpawn = 1115,
+
+        /// <summary>Host-authoritative Viking transport positions and late-join spawns.</summary>
+        RaiderBoats = 1116,
+
         // 1120-1129  dragons
         // One id for all three kinds, the kind travels in the payload, since the three spawns
         // differ only in which method the receiver calls.
         DragonSpawn = 1120,
         DragonHealth = 1121,
         DragonFlight = 1122,
+        // The host's "DRAGON SIGHTED!" banner, so every guest's goes up with it. See Net/DragonAlerts.cs.
+        DragonSighted = 1123,
 
         // 1130-1139  diplomacy
         PlayerRelation = 1130,
@@ -101,6 +112,19 @@
         // Removed: it stopped and started the simulation on events that were not part of the game
         // and desynced more than it saved. The number is left unused rather than reassigned, so a
         // copy of the mod that predates this cannot be handed a different message under its id.
+
+        // AI kingdoms (run on the host): the roster every guest sees, a guest's request to one and
+        // its answer, and the AI's own proposals to a guest (a tribute demand, a peace offer) with
+        // the guest's reply. See Net/AiDiplomacy.cs.
+        AiRoster = 1133,
+        AiRequest = 1134,
+        AiResult = 1135,
+        AiProposal = 1136,
+        AiProposalAnswer = 1137,
+        // One of an AI kingdom's buildings, host to guests, so guests can see AI kingdoms at all.
+        AiBuild = 1138,
+        // Guest asks the host to restate every relation and AI opinion before opening diplomacy.
+        DiplomacyRefresh = 1139,
 
         // 1140-1149  siege catapults
         // Catapults are built from a barracks, and that barracks only ticks on its owner's
@@ -116,6 +140,11 @@
 
         // 1160-1169  streamer effects
         StreamerEffects = 1160,
+
+        // 1170-1179  companion mods
+        // One id for every companion mod: the channel name travels in the payload, so a new
+        // companion needs no id of its own. See Net/AddonChannel.cs.
+        Addon = 1170,
     }
 
     public static class NetMessageIdExtensions
@@ -138,6 +167,7 @@
             if (v < 1150) return "siege";
             if (v < 1160) return "wildlife";
             if (v < 1170) return "streamer";
+            if (v < 1180) return "addon";
             return "unassigned";
         }
     }

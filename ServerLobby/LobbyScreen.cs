@@ -187,6 +187,7 @@ namespace KaCMultiplayer
                 ChatBox = Bind<TMP_InputField>("Container/ChatInput");
                 SendButton = Bind<Button>("Container/SendMessage");
                 StartButton = Bind<Button>("Container/Start");
+                AiKingdomControl.EnsureBuilt(StartButton);
 
                 NameBox = BindInChildren<TMP_InputField>("Container/ServerSettings/ServerName");
                 NameBox.text = $"{SteamFriends.GetPersonaName()}'s Server";
@@ -294,16 +295,24 @@ namespace KaCMultiplayer
                             return;
                         }
 
+                        AiKingdomEditor.Close();
                         NetRouter.Broadcast(new SessionStartMessage());
 
-                        // Broadcast goes to the clients only, and SessionStartMessage's handler is
-                        // registered OnClient, so the host was the one machine nobody told the
-                        // session had started. Its lobby object stayed active underneath the game
-                        // for the whole session, which left this screen's Update still claiming
-                        // the Return key that in-game chat wants. Same transition the clients
-                        // make, so host and guest leave the lobby the same way.
+                        // SessionStartMessage's own handler (NetRegistrations.ApplySessionStart)
+                        // is registered as NetRegistry.OnClient -- it runs for whoever RECEIVES
+                        // the broadcast, not for the host that sent it. Nothing previously told
+                        // the host's own screen the same thing: DifficultyPicker and the rest of
+                        // this lobby's UI stayed activeInHierarchy=true for the host through an
+                        // entire running game, which a companion addon building UI anchored to
+                        // this screen surfaced by never being able to hide itself again. Calling
+                        // the exact same transition ApplySessionStart already uses keeps host and
+                        // guest symmetric.
                         Main.TransitionTo(MenuState.LeaveMenus);
 
+                        // Cleared first so a manual-placement or loaded game never inherits the
+                        // previous game's assignments. AIKingdomPlacementHook keeps AI kingdoms
+                        // off every island listed here.
+                        Main.HumanKeepLandmasses.Clear();
                         if (PlacementPicker.value != 0 || SteamLobby.loadingSave)
                             return;
 
@@ -330,6 +339,7 @@ namespace KaCMultiplayer
                             }
 
                             int idx = available[next++];
+                            Main.HumanKeepLandmasses.Add(idx);
                             Main.helper.Log($"[lobby] placing {kcPlayer.name}'s keep on landmass {idx}");
 
                             NetRouter.SendTo(new KeepPlaceRandomMessage
@@ -522,7 +532,11 @@ namespace KaCMultiplayer
                 // never depended on catching one of these ticks. Password state is read off the
                 // controls here, so it now freezes at whatever the lobby settled on, which is
                 // correct, the password cannot be edited once the lobby screen is gone.
-                if (GameState.inst != null && GameState.inst.IsPlayMode()) return;
+                //
+                // GameInProgress rather than IsPlayMode, which is false while the ESC menu is open:
+                // the host would re-read the stale lobby controls into the settings a rejoining
+                // player is sent, and a guest in its menu would take the lobby's difficulty.
+                if (Main.GameInProgress) return;
 
                 if (NetHost.IsRunning)
                     ReadSettingsFromControls();
@@ -564,6 +578,7 @@ namespace KaCMultiplayer
             UpdatePasswordPlaceholder();
 
             ApplyWorldSettings(s);
+            AiKingdomControl.Refresh(false);
         }
 
         /// <summary>Host side: the controls are the source of truth, so read them and publish.</summary>
@@ -634,6 +649,11 @@ namespace KaCMultiplayer
             s.WorldType = MultiplayerMapBias;   // not a player choice, see MultiplayerMapBias
 
             ApplyWorldSettings(s);
+
+            // A loaded world brings its own AI kingdoms: list them (read-only) rather than the
+            // empty slots the Add AI button would otherwise leave.
+            if (!canEditWorld) AiKingdomControl.AdoptLoadedWorld(s);
+            AiKingdomControl.Refresh(canEditWorld);
 
             // A changed setting means a changed map. See RegenerateIfStale. Not while a save is
             // being loaded: the save decides the world then, and its controls are locked.
@@ -840,8 +860,8 @@ namespace KaCMultiplayer
             //
             // In the lobby this still applies normally, which is how a guest receives the host's
             // choice. LobbySettings.Current is also seeded from the save on load (SessionSave), so
-            // the two agree rather than fight.
-            if (GameState.inst != null && GameState.inst.IsPlayMode()) return;
+            // the two agree rather than fight. GameInProgress, so an open ESC menu counts as play.
+            if (Main.GameInProgress) return;
 
             Player.inst.difficulty = (Player.Difficulty)s.Difficulty;
         }

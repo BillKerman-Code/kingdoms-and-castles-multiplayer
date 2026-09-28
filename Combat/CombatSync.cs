@@ -522,6 +522,36 @@ namespace KaCMultiplayer.Combat
         }
 
         /// <summary>
+        /// Tells everyone a den this machine arbitrates has just been cleared: its last wolf died
+        /// and WolfDen.Tick destroyed it, in the same tick.
+        ///
+        /// That same tick is why SweepWolves cannot say it. The sweep runs ten times a second and
+        /// speaks only when a pack changes, and once the den is destroyed it is no longer in
+        /// WolfDen.wolfDens to be swept at all. So when the last wolf died between two sweeps, the
+        /// final thing everyone else heard still had that wolf alive; on their machines it stayed
+        /// alive, its den never emptied, and the den never went away -- "wolf dens don't despawn
+        /// sometimes". One empty pack settles it: ApplyWolfPackHealth kills every wolf the arbiter
+        /// no longer has, and each machine's own WolfDen.Tick then clears the den the ordinary way.
+        ///
+        /// Called from Main.WolfDenClearedHook, on every machine; only the arbiter sends.
+        /// </summary>
+        public static void PublishWolfDenCleared(WolfDen den)
+        {
+            try
+            {
+                if (den == null || !Main.CombatAuthorityEnabled || !NetClient.client.IsConnected) return;
+                if (!CombatAuthority.ResolvesHere(den.GetPos())) return;
+
+                lastWolfLives.Remove(den.guid);
+                PublishedUpdates++;
+
+                NetRouter.Send(new WolfPackHealthMessage { Den = den.guid, Lives = new List<float>() });
+                NetLog.Info("wolf den " + den.guid + " cleared here; telling everyone");
+            }
+            catch (Exception ex) { NetLog.Error("publishing a cleared wolf den", ex); }
+        }
+
+        /// <summary>
         /// Whether a pack still matches what we last published about it, answered by reading the
         /// wolves directly so an untouched den costs a few float comparisons and no allocation.
         /// </summary>

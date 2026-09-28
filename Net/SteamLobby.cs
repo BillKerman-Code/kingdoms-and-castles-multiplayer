@@ -164,6 +164,7 @@ namespace KaCMultiplayer.Net
                 KaCMultiplayer.Lobby.DealRequestWindow.Reset();
                 KaCMultiplayer.Lobby.DealNoticeWindow.Reset();
                 KaCMultiplayer.Lobby.AllianceRequestWindow.Reset();
+                KaCMultiplayer.Lobby.AiProposalWindow.Reset();
                 KaCMultiplayer.Lobby.ResourcePicker.Reset();
             });
 
@@ -273,8 +274,15 @@ namespace KaCMultiplayer.Net
         ///
         /// Walked backwards, because RemovePersonFromWorld removes from the very list being
         /// iterated.
+        ///
+        /// Internal rather than private: the return-to-menu teardown in Main.cs needs this exact
+        /// removal for the LOCAL player's own villagers too, which the caller above deliberately
+        /// skips (see its comment) on the assumption that vanilla resets Player.inst on its own.
+        /// That assumption holds when a NEW game is about to reuse it; it does not hold for a
+        /// player who is simply leaving, whose villagers otherwise stayed behind, visible on the
+        /// main menu.
         /// </summary>
-        private static void RemoveVillagers(Player owner, ArrayExt<Villager> people)
+        internal static void RemoveVillagers(Player owner, ArrayExt<Villager> people)
         {
             if (owner == null || people == null) return;
 

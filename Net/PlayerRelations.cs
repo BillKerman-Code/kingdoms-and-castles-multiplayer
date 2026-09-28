@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -65,6 +65,20 @@ namespace KaCMultiplayer.Net
             return teamA >= MpTeamBase && teamB >= MpTeamBase;
         }
 
+        /// <summary>
+        /// True when this pair is an AI kingdom (teams 2-4) and a multiplayer player. Vanilla cannot
+        /// hold these either -- its relation array stops at team 4 and World.SetRelations throws
+        /// past it -- so they are kept here with the player pairs. Not tied to an AI kingdom
+        /// existing on THIS machine: a guest stores what the host sends even though the host is
+        /// the one running the AI.
+        /// </summary>
+        public static bool IsAiPair(int teamA, int teamB)
+        {
+            bool aIsAi = teamA >= AiDiplomacy.FirstAiTeam && teamA <= AiDiplomacy.LastAiTeam;
+            bool bIsAi = teamB >= AiDiplomacy.FirstAiTeam && teamB <= AiDiplomacy.LastAiTeam;
+            return (aIsAi && teamB >= MpTeamBase) || (bIsAi && teamA >= MpTeamBase);
+        }
+
         /// <summary>Order-independent key, so (5,6) and (6,5) are the same entry. See TeamPair.</summary>
         private static long Key(int teamA, int teamB)
         {
@@ -94,7 +108,7 @@ namespace KaCMultiplayer.Net
         public static void Set(int teamA, int teamB, World.Relations r)
         {
             if (teamA == teamB) return;                       // a kingdom cannot declare war on itself
-            if (!IsPlayerPair(teamA, teamB)) return;          // vanilla's table owns this pair
+            if (!IsPlayerPair(teamA, teamB) && !IsAiPair(teamA, teamB)) return;   // vanilla's table owns this pair
 
             World.Relations was = Get(teamA, teamB);
             relations[Key(teamA, teamB)] = r;
@@ -111,6 +125,34 @@ namespace KaCMultiplayer.Net
 
         /// <summary>Alliances whose map has already been revealed, so the reveal happens once.</summary>
         private static readonly HashSet<long> revealedFor = new HashSet<long>();
+
+        /// <summary>When to re-lift allies' fog after a load, or negative for not pending.</summary>
+        private static float revealAfterLoadAt = -1f;
+
+        /// <summary>Post-load reveals still to do. Two, a few seconds apart, in case a slow load
+        /// put its fog back after the first.</summary>
+        private static int revealsAfterLoad;
+
+        /// <summary>
+        /// Called every frame from Main. After a load, once the game is back in play and has put
+        /// its own fog back, lifts it again for every alliance this kingdom is in (see Restore).
+        /// </summary>
+        public static void Tick()
+        {
+            if (revealsAfterLoad <= 0 || Time.unscaledTime < revealAfterLoadAt) return;
+            if (GameState.inst == null || !GameState.inst.IsPlayMode()) return;
+
+            revealsAfterLoad--;
+            revealAfterLoadAt = Time.unscaledTime + 5f;
+
+            try
+            {
+                revealedFor.Clear();
+                foreach (KeyValuePair<long, World.Relations> entry in relations)
+                    RevealAllyLandsOnce(TeamPair.Low(entry.Key), TeamPair.High(entry.Key), entry.Value);
+            }
+            catch (Exception ex) { NetLog.Error("re-lifting allies' fog after a load", ex); }
+        }
 
         /// <summary>
         /// Lifts the fog over the map when the LOCAL player enters an alliance.
@@ -259,6 +301,14 @@ namespace KaCMultiplayer.Net
                 relations[entry.Key] = entry.Value;
 
             NetLog.Info("relations: restored " + relations.Count + " pair(s)");
+
+            // An alliance lifts the fog once, when it is made -- and a load brings the fog back
+            // while the alliance itself survives, so an ally's island came back as "Unknown Land"
+            // with their castle hidden under it. Lifted again shortly after the load (not now: the
+            // game is still restoring its own fog, which would paint over it).
+            revealedFor.Clear();
+            revealAfterLoadAt = Time.unscaledTime + 2f;
+            revealsAfterLoad = 2;
 
             try
             {
@@ -747,13 +797,31 @@ namespace KaCMultiplayer.Net
         }
 
         /// <summary>
-        /// Moves gold between two kingdoms, and returns what actually moved.
-        ///
-        /// Clamped to what the payer holds rather than refused outright, matching how the mod
-        /// already settles a merchant delivery somebody cannot fully afford. A ransom nobody can
-        /// quite pay should still end the war for everything they have, not fail and leave both
-        /// sides confused about whether the deal went through.
+        /// The one announcement both ends of an accepted deal produce: the gold path in the
+        /// Accept case calls it immediately, everything else calls it once
+        /// <see cref="Messages.DealKind.Resolved"/> reports the real amount. Pulled out so the two
+        /// callers cannot drift into saying it two different ways.
         /// </summary>
+        private static void AnnounceDealAccepted(int acceptorTeam, int otherTeam, int proposer,
+                                                  FreeResourceType resource, int paid, bool wasFighting)
+        {
+            Announce(acceptorTeam, otherTeam, "accepted the deal with",
+                     paid + " " + ResourceLabel(resource) + " paid"
+                     + (wasFighting ? ", the war is over" : ""));
+
+            // Same reasoning as Refuse: only the proposer gets a popup, the acceptor already
+            // knows, they just clicked Accept. acceptorTeam is never the proposer -- ApplyDeal's
+            // Accept case rejects a proposer trying to accept its own deal before this is ever
+            // called -- so it is always who the proposer actually dealt with.
+            if (proposer == MyTeamOrZero())
+            {
+                string byWho = Main.KingdomNameForTeam(acceptorTeam);
+                KaCMultiplayer.Lobby.DealNoticeWindow.ShowResolved("Accepted",
+                    byWho + " accepted your " + paid + " " + ResourceLabel(resource)
+                    + " request." + (wasFighting ? " The war is over." : ""));
+            }
+        }
+
         /// <summary>True when an int off the wire names a resource we are willing to move.</summary>
         private static bool ValidResource(int raw, out FreeResourceType type)
         {
@@ -820,7 +888,7 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private static int TakeFromKingdom(int team, FreeResourceType type, int amount)
         {
-            if (amount <= 0) return 0;
+            if (amount <= 0 || type != FreeResourceType.Gold) return 0;
 
             LandmassOwner owner = World.GetLandmassOwnerByTeamId(team);
             if (owner == null) return 0;
@@ -918,6 +986,109 @@ namespace KaCMultiplayer.Net
             return have - left;
         }
 
+        /// <summary>
+        /// Moves up to <paramref name="amount"/> of a resource between two kingdoms on THIS machine,
+        /// both of whose stores it actually holds (the host dealing with an AI kingdom it runs).
+        /// Gold moves between treasuries; anything else out of one kingdom's public stores and into
+        /// the other's. Whatever the receiver has no room for goes back where it came from, so
+        /// nothing is lost. Returns what actually arrived.
+        /// </summary>
+        internal static int Transfer(LandmassOwner from, LandmassOwner to, FreeResourceType type, int amount)
+        {
+            if (from == null || to == null || amount <= 0) return 0;
+
+            int taken = TakeFromStores(from, type, amount);
+            DeliverTo(to, type, taken);
+            return taken;
+        }
+
+        /// <summary>
+        /// Takes up to <paramref name="want"/> out of a kingdom: its treasury for gold, its public
+        /// stores for anything else. Returns what was actually taken.
+        /// </summary>
+        internal static int TakeFromStores(LandmassOwner owner, FreeResourceType type, int want)
+        {
+            if (owner == null || want <= 0) return 0;
+
+            if (type == FreeResourceType.Gold)
+            {
+                int paid = System.Math.Min(want, System.Math.Max(0, owner.Gold));
+                owner.Gold -= paid;
+                return paid;
+            }
+
+            return TakeFrom(owner, type, want);
+        }
+
+        /// <summary>
+        /// Delivers <paramref name="amount"/> to a kingdom: gold into its treasury, anything else
+        /// into its public stores, and whatever the stores have no room for dropped as piles at its
+        /// keep -- which is exactly how the game delivers a gift (Envoy.DropGift puts the envoy's
+        /// load on the ground with World.DropResources). So nothing given is ever lost, and a young
+        /// kingdom with no stockpile yet still receives it.
+        /// </summary>
+        internal static void DeliverTo(LandmassOwner owner, FreeResourceType type, int amount)
+        {
+            if (owner == null || amount <= 0) return;
+
+            if (type == FreeResourceType.Gold)
+            {
+                owner.Gold += amount;
+                return;
+            }
+
+            int stored = GiveTo(owner, type, amount);
+            int left = amount - stored;
+            if (left <= 0) return;
+
+            Vector3? keep = KeepPositionOf(owner);
+            if (keep == null)
+            {
+                NetLog.Warn("deliver: no keep to drop " + left + " " + ResourceLabel(type) + " at for team " + owner.teamId);
+                return;
+            }
+
+            Assets.Code.ResourceAmount pile = new Assets.Code.ResourceAmount();
+            pile.Set(type, left);
+            World.DropResources(keep.Value, pile);
+            NetLog.Info("deliver: " + left + " " + ResourceLabel(type) + " left as piles at team " + owner.teamId + "'s keep");
+        }
+
+        /// <summary>Where a kingdom's keep stands, or null if it has none.</summary>
+        internal static Vector3? KeepPositionOf(LandmassOwner owner)
+        {
+            if (owner == null) return null;
+
+            var owned = new HashSet<int>(Landmasses(owner));
+            foreach (Keep k in UnityEngine.Object.FindObjectsOfType<Keep>())
+            {
+                Building b = k.GetComponent<Building>();
+                if (b != null && owned.Contains(b.LandMass())) return k.transform.position;
+            }
+            return null;
+        }
+
+        /// <summary>How much of a resource a kingdom holds in its public stores (or treasury).</summary>
+        internal static int StockOf(LandmassOwner owner, FreeResourceType type)
+        {
+            if (owner == null) return 0;
+            if (type == FreeResourceType.Gold) return System.Math.Max(0, owner.Gold);
+
+            int total = 0;
+            foreach (int lm in Landmasses(owner))
+            {
+                var stores = FreeResourceManager.inst.GetResourceStorageListFor(type, lm);
+                if (stores == null) continue;
+                for (int i = 0; i < stores.Count; i++)
+                {
+                    var store = stores.data[i];
+                    if (store == null || store.IsPrivate()) continue;
+                    total += System.Math.Max(0, store.StoredPublicResources().Get(type));
+                }
+            }
+            return total;
+        }
+
         /// <summary>The landmasses a kingdom owns, or nothing if it owns none.</summary>
         private static IEnumerable<int> Landmasses(LandmassOwner owner)
         {
@@ -1010,6 +1181,14 @@ namespace KaCMultiplayer.Net
         /// <summary>Sends a proposal or an answer. Public so the diplomacy window can use it too.</summary>
         public static void Send(int from, int to, Messages.DealKind kind, int amount, FreeResourceType res)
         {
+            // An AI kingdom has no machine to answer a deal message; it answers here, with its own
+            // rules (AiDiplomacy), on the host that runs it.
+            if (AiDiplomacy.IsAiTeam(to))
+            {
+                AiDiplomacy.HandleDeal(from, to, kind, amount, res);
+                return;
+            }
+
             NetRouter.Send(new Messages.DiplomacyDealMessage
             {
                 FromTeam = from,
@@ -1210,6 +1389,9 @@ namespace KaCMultiplayer.Net
             allianceOffers.Clear();
             pendingWars.Clear();
             revealedFor.Clear();
+            revealAfterLoadAt = -1f;
+            revealsAfterLoad = 0;
+            AiDiplomacy.Reset();
         }
     }
 }

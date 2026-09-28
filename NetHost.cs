@@ -103,7 +103,9 @@ namespace KaCMultiplayer
                     // where the transfer progress bar is.
                     WorldComesFromHost = SteamLobby.loadingSave
                                || KaCMultiplayer.LoadSaveOverrides.LoadIdentity.IsLoadedSession
-                               || Main.PlayHasBegun
+                               || Main.PlayHasBegun,
+
+                    HostVersion = Main.ModVersion
                 }, ev.Client.Id);
             };
 
