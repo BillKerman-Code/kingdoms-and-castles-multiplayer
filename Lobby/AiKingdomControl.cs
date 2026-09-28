@@ -10,13 +10,13 @@ namespace KaCMultiplayer.Lobby
 {
     /// <summary>
     /// The lobby's AI kingdom controls: a "- AI Kingdoms: n/max + Add AI" strip at the bottom of
-    /// the Players column, and one row per AI kingdom in the player list itself -- its real name
+    /// the Players column, and one row per AI kingdom in the player list itself, its real name
     /// with "(AI)", its banner, and its own difficulty stepper.
     ///
     /// Built in code rather than bound from a prefab node: the lobby prefab has never had AI
     /// controls (AI kingdoms have never worked in multiplayer before now). The player list's
     /// ScrollRect fills the whole column down to the Back button, so the list is shortened by the
-    /// strip's height and the strip takes the freed space -- the same arrangement the Chat column
+    /// strip's height and the strip takes the freed space, the same arrangement the Chat column
     /// uses for its input box. AI rows are clones of the same PlayerEntry prefab human rows use,
     /// kept after the human rows so they read as "under the players".
     ///
@@ -198,7 +198,7 @@ namespace KaCMultiplayer.Lobby
         ///
         /// Read-only: the controls stay disabled while a save is loaded (the save decides its AI
         /// kingdoms, the same way it decides the map), and nothing here changes the kingdoms
-        /// themselves -- a loaded world never places AI again (AIKingdomPlacementHook sees them
+        /// themselves, a loaded world never places AI again (AIKingdomPlacementHook sees them
         /// already there).
         /// </summary>
         public static void AdoptLoadedWorld(LobbySettings s)
@@ -475,7 +475,7 @@ namespace KaCMultiplayer.Lobby
 
         /// <summary>
         /// Lays the row out itself rather than squeezing a stepper into the human row's own
-        /// layout. Doing that first time round crushed the prefab's name label to nothing -- the
+        /// layout. Doing that first time round crushed the prefab's name label to nothing, the
         /// AI rows showed a flag and a difficulty with a blank gap where the name belonged. So the
         /// prefab now supplies only the row's background and height: its own children are hidden,
         /// and one content strip (excluded from the prefab's layout, stretched across the row)
@@ -606,7 +606,7 @@ namespace KaCMultiplayer.Lobby
     ///
     /// The name box is a clone of the lobby's own server-name field, so it looks and types like
     /// every other text box on the screen. An empty name means "use the game's own name for this
-    /// flag" -- the placeholder shows what that is. The flag steps through the game's livery sets,
+    /// flag", the placeholder shows what that is. The flag steps through the game's livery sets,
     /// skipping any banner a human or another AI already has, same rule as the lobby uses when an
     /// AI is first added.
     ///

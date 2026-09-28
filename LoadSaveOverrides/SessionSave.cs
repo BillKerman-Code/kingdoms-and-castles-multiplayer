@@ -224,7 +224,7 @@ namespace KaCMultiplayer.LoadSaveOverrides
         /// Logs what this machine's own copy of a FOREIGN kingdom's job-worked storage buildings
         /// actually holds, at the moment that kingdom gets packed into a save.
         ///
-        /// DIAGNOSTIC ONLY -- writes nothing, changes nothing. Added while investigating a live
+        /// DIAGNOSTIC ONLY, writes nothing, changes nothing. Added while investigating a live
         /// report (BlueJay, Discord, 2026-09-21) of a rejoining guest's materials resetting to
         /// near-empty except Stone and Gold. The read root cause: this machine never (re)assigns a
         /// job belonging to a kingdom that is not its own (see
@@ -232,13 +232,13 @@ namespace KaCMultiplayer.LoadSaveOverrides
         /// <see cref="KaCMultiplayer.Net.PlayerRelations.TakeFrom"/>'s doc comment for the same gap
         /// caught earlier the same night in a diplomacy trade), so a foreign kingdom's Stockpile,
         /// Granary and similar buildings only ever hold what they had the last time this machine's
-        /// copy was accurate -- and <see cref="Main.PackLiveSnapshot"/> is exactly what a rejoining
+        /// copy was accurate, and <see cref="Main.PackLiveSnapshot"/> is exactly what a rejoining
         /// player's own kingdom gets restored from when THIS machine is the host.
         ///
         /// This line is the fix's follow-up, not the fix: no correction is applied here (see
         /// PackLiveSnapshot's own doc comment for why a live one was judged too risky to write
         /// without a real session to test it against). What this buys instead is a checkable record
-        /// -- next time a player reports their materials came back wrong after reconnecting, this
+        /// next time a player reports their materials came back wrong after reconnecting, this
         /// line (search the log for "[SAVE] packed storage snapshot") says exactly what this
         /// machine believed they had at the moment it packed their kingdom, which is either the
         /// smoking gun or the thing that rules this theory out for good.

@@ -67,8 +67,8 @@ namespace KaCMultiplayer.Net
 
         /// <summary>
         /// True when this pair is an AI kingdom (teams 2-4) and a multiplayer player. Vanilla cannot
-        /// hold these either -- its relation array stops at team 4 and World.SetRelations throws
-        /// past it -- so they are kept here with the player pairs. Not tied to an AI kingdom
+        /// hold these either, its relation array stops at team 4 and World.SetRelations throws
+        /// past it, so they are kept here with the player pairs. Not tied to an AI kingdom
         /// existing on THIS machine: a guest stores what the host sends even though the host is
         /// the one running the AI.
         /// </summary>
@@ -302,7 +302,7 @@ namespace KaCMultiplayer.Net
 
             NetLog.Info("relations: restored " + relations.Count + " pair(s)");
 
-            // An alliance lifts the fog once, when it is made -- and a load brings the fog back
+            // An alliance lifts the fog once, when it is made, and a load brings the fog back
             // while the alliance itself survives, so an ally's island came back as "Unknown Land"
             // with their castle hidden under it. Lifted again shortly after the load (not now: the
             // game is still restoring its own fog, which would paint over it).
@@ -981,7 +981,7 @@ namespace KaCMultiplayer.Net
         /// <summary>
         /// Delivers <paramref name="amount"/> to a kingdom: gold into its treasury, anything else
         /// into its public stores, and whatever the stores have no room for dropped as piles at its
-        /// keep -- which is exactly how the game delivers a gift (Envoy.DropGift puts the envoy's
+        /// keep, which is exactly how the game delivers a gift (Envoy.DropGift puts the envoy's
         /// load on the ground with World.DropResources). So nothing given is ever lost, and a young
         /// kingdom with no stockpile yet still receives it.
         /// </summary>

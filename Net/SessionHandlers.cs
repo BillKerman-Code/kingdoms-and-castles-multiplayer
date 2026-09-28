@@ -32,7 +32,7 @@ namespace KaCMultiplayer.Net
 
         /// <summary>
         /// Guest: says so, on both screens, when this build is not the host's. Builds that differ
-        /// read some messages differently -- formats have changed from one build to the next --
+        /// read some messages differently, formats have changed from one build to the next,
         /// and the symptoms (a join that loads and then drops, a kingdom that is not recognised)
         /// look like anything but a version problem. Not a refusal: a warning, and a line in both
         /// logs.

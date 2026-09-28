@@ -327,7 +327,7 @@ namespace KaCMultiplayer.Lobby
         /// <summary>
         /// One AI kingdom's row. Same buttons, same "only the ones that mean something right now"
         /// rule as a player's row, but each one asks the AI (AiDiplomacy), which answers at once
-        /// on this machine -- so the list is redrawn straight after, rather than waiting for a
+        /// on this machine, so the list is redrawn straight after, rather than waiting for a
         /// message to come back the way a player's answer does. The name line also carries the
         /// AI's opinion of you, because that is what decides every answer it gives.
         /// </summary>

@@ -14,7 +14,7 @@ namespace KaCMultiplayer.Lobby
     /// Source: GameUI.inst.diplomacyUI (the vanilla DiplomacyUI, which the game only opens when AI
     /// kingdoms exist, so it sits inactive in every multiplayer session) and
     /// GameUI.inst.diplomacyNotificationUI's kingdom rows. Both are public fields on a public
-    /// singleton -- no scene search needed, nothing the mod compiler's security scan could object
+    /// singleton, no scene search needed, nothing the mod compiler's security scan could object
     /// to. Taken: the main panel's sprite, the game's button art and colour transitions, and the
     /// fonts and text colours of the kingdom name and standing lines.
     ///

@@ -299,7 +299,7 @@ namespace KaCMultiplayer
                         NetRouter.Broadcast(new SessionStartMessage());
 
                         // SessionStartMessage's own handler (NetRegistrations.ApplySessionStart)
-                        // is registered as NetRegistry.OnClient -- it runs for whoever RECEIVES
+                        // is registered as NetRegistry.OnClient, it runs for whoever RECEIVES
                         // the broadcast, not for the host that sent it. Nothing previously told
                         // the host's own screen the same thing: DifficultyPicker and the rest of
                         // this lobby's UI stayed activeInHierarchy=true for the host through an

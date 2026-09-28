@@ -10,14 +10,14 @@ namespace KaCMultiplayer.Net
 {
     /// <summary>
     /// Diplomacy between human kingdoms and AI kingdoms: alliance, breaking one, war, peace,
-    /// tribute and gifts -- answered by the AI the way the game's own AI answers -- and the AI's
+    /// tribute and gifts, answered by the AI the way the game's own AI answers, and the AI's
     /// own initiatives toward players (warnings, war, gold demands, gifts, peace offers).
     ///
     /// WHERE THE GAME'S RULES ACTUALLY LIVE. Vanilla has no C# "should I accept" method. Every
     /// exchange with an AI is a dialogue-system conversation, and the accept/refuse conditions are
     /// script lines in the game's dialogue data. What C# owns is the AI's OPINION: per team, on the
     /// AI's own LandmassOwner (standings, 0 VeryUnfavorable .. 4 VeryFavorable, plus points toward
-    /// the next level), moved by LandmassOwner.ModifyStandingFor -- per team already, so every
+    /// the next level), moved by LandmassOwner.ModifyStandingFor, per team already, so every
     /// human has their own standing with every AI. This file reads and moves it through the game's
     /// own private methods (by reflection, as the mod already calls the game's private StartGame)
     /// and applies the thresholds read out of the dialogue data:

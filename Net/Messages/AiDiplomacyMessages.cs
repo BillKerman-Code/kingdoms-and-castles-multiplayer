@@ -28,7 +28,7 @@ namespace KaCMultiplayer.Net.Messages
     }
 
     /// <summary>
-    /// Host to everyone: the AI kingdoms the host is running -- team, flag, name -- and each one's
+    /// Host to everyone: the AI kingdoms the host is running, team, flag, name, and each one's
     /// opinion of every human team. A guest has no AI kingdoms of its own, so this is how its
     /// diplomacy window knows who they are and what they think of it.
     /// </summary>
@@ -136,7 +136,7 @@ namespace KaCMultiplayer.Net.Messages
     /// <summary>
     /// Host to one guest: an AI kingdom's answer, or a notice from it (a warning, a gift), plus
     /// anything the guest should now put into its OWN stores (tribute paid, a refused gift sent
-    /// back, a gift from the AI) -- which only the guest's machine can do for real.
+    /// back, a gift from the AI), which only the guest's machine can do for real.
     /// </summary>
     public class AiResultMessage : INetMessage
     {

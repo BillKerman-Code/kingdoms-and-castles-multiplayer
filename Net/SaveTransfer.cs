@@ -441,7 +441,7 @@ namespace KaCMultiplayer.Net
             //
             // Quiet since the last chunk AND the last request. Measured from the last chunk alone,
             // a quiet spell stayed quiet until something new arrived, and this asked again every
-            // MinRequestGap -- twenty times a second, for the same chunks -- burying them in the
+            // MinRequestGap, twenty times a second, for the same chunks, burying them in the
             // host's queue behind copies of themselves. That is what stopped a join at 25%.
             bool quiet = now - Math.Max(lastChunkAt, lastRequestAt) >= StallSeconds;
 

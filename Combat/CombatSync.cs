@@ -529,7 +529,7 @@ namespace KaCMultiplayer.Combat
         /// speaks only when a pack changes, and once the den is destroyed it is no longer in
         /// WolfDen.wolfDens to be swept at all. So when the last wolf died between two sweeps, the
         /// final thing everyone else heard still had that wolf alive; on their machines it stayed
-        /// alive, its den never emptied, and the den never went away -- "wolf dens don't despawn
+        /// alive, its den never emptied, and the den never went away, "wolf dens don't despawn
         /// sometimes". One empty pack settles it: ApplyWolfPackHealth kills every wolf the arbiter
         /// no longer has, and each machine's own WolfDen.Tick then clears the den the ordinary way.
         ///

@@ -99,9 +99,9 @@ namespace KaCMultiplayer
         /// <summary>
         /// Builds the parallel <see cref="Player"/> for an AI kingdom, host-only.
         ///
-        /// Reuses the exact same wiring a remote human's Player gets -- CopySharedSceneRefs,
+        /// Reuses the exact same wiring a remote human's Player gets, CopySharedSceneRefs,
         /// EnableAllJobSlots, ResetAsIfSingleton, see those methods' own doc comments for what
-        /// each one fixes -- but points PlayerLandmassOwner at the <paramref name="existingOwner"/>
+        /// each one fixes, but points PlayerLandmassOwner at the <paramref name="existingOwner"/>
         /// AIKingdom.SetupBase already created and registered via TakeOwnership, rather than
         /// building a second, orphaned LandmassOwner for the same landmass/team the way
         /// BuildRemotePlayer would. World.GetLandmassOwner(landmass) must keep resolving to the
@@ -110,12 +110,12 @@ namespace KaCMultiplayer
         /// in the game ever looking at it.
         ///
         /// Exists because AIKingdom.Update() and its Intention_* tick chain read and write
-        /// through the ambient Player.inst singleton -- AddVillager, SetJobPriorityOrder,
+        /// through the ambient Player.inst singleton, AddVillager, SetJobPriorityOrder,
         /// GetBuildingListForLandMass, TotalResidentialSlotsOnLandMass, confirmed via the shipped
         /// IL, none of them take the AI's own identity as a parameter, they act on whichever
         /// Player instance happens to be Player.inst when called. Run that tick with Player.inst
         /// pointed at anything else and an AI kingdom's villagers and job-priority writes land on
-        /// THAT kingdom instead -- on the host, its own real kingdom, silently. This Player
+        /// THAT kingdom instead, on the host, its own real kingdom, silently. This Player
         /// exists so the host has something correct to swap Player.inst to for the duration of
         /// that one tick (see AIKingdomOwnerHook), not as an optional nicety.
         /// </summary>

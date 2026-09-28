@@ -6,14 +6,14 @@ using KaCMultiplayer.Net.Messages;
 namespace KaCMultiplayer.Net
 {
     /// <summary>
-    /// The dragon panel by the minimap -- "N years..." until the next attack, and the
-    /// "DRAGON SIGHTED!" banner when one comes -- the same on every screen.
+    /// The dragon panel by the minimap, "N years..." until the next attack, and the
+    /// "DRAGON SIGHTED!" banner when one comes, the same on every screen.
     ///
     /// The dragons themselves are the host's (spawn, flight and fire are all host-driven), but the
     /// panel was each machine's own:
     ///
     ///   The countdown is DragonSpawn.yearsUntilNextAttack, which each machine re-rolls from its
-    ///   own random numbers whenever its own countdown runs out -- and a guest's runs out on a
+    ///   own random numbers whenever its own countdown runs out, and a guest's runs out on a
     ///   spawn that its own copy is not allowed to make. So "8 years" on one screen and something
     ///   else on the other.
     ///

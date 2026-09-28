@@ -382,7 +382,7 @@ namespace KaCMultiplayer.Net
 
             // AI kingdoms. They run on the host only, so every one of these is either the host
             // telling a guest something (roster, answer, proposal) or a guest asking the host
-            // (request, answer to a proposal) -- never relayed on to anyone else.
+            // (request, answer to a proposal), never relayed on to anyone else.
             NetRegistry.Register<AiRosterMessage>(NetMessageId.AiRoster);
             NetRegistry.OnClient<AiRosterMessage>(NetMessageId.AiRoster,
                 (m, ctx) => AiDiplomacy.ApplyRoster(m));
@@ -2335,7 +2335,7 @@ namespace KaCMultiplayer.Net
         private static void RecordKingdomLabel(KingdomLabelMessage m, NetContext ctx)
         {
             // An empty name is not a rename. A joining player's game announces its kingdom before
-            // it has one -- before the save has even arrived -- and taking that at its word wiped
+            // it has one, before the save has even arrived, and taking that at its word wiped
             // a returning player's saved name: the next save held "" for them, and on the load
             // after that their game fell back to the save's own town name, the host's.
             if (string.IsNullOrEmpty(m.KingdomName) || m.KingdomName.Trim().Length == 0) return;

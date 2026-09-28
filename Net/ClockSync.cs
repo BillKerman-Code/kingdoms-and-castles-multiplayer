@@ -10,7 +10,7 @@ namespace KaCMultiplayer.Net
     ///
     /// Each machine runs its own calendar (Weather.Update counts seasonTime down and turns the
     /// season over, and a new summer is a new year), and nothing ever compared them. Speed is
-    /// shared, so two machines that never stop stay together -- but any stall on one of them is
+    /// shared, so two machines that never stop stay together, but any stall on one of them is
     /// never made up: an Escape pause on a build that still paused, a machine that stopped while
     /// alt-tabbed, a long hitch, a load. Stalls only ever add up. In a real session a guest
     /// ended up two whole years behind the host, which put the host's dragon attack in a
@@ -19,15 +19,15 @@ namespace KaCMultiplayer.Net
     /// The host says where its calendar is every few seconds (ClockSyncMessage). A guest
     /// measures the gap in game-seconds and closes it:
     ///
-    ///   BEHIND  -- it runs forward. Within a season that is just less time left in it. Across a
+    ///   BEHIND:  it runs forward. Within a season that is just less time left in it. Across a
     ///              season, the season is ended and the game's own Weather.Update turns it over
     ///              (harvest, snow, a new year and all), one season a frame, until caught up. The
     ///              work that would have happened in the skipped time does not, but every season
     ///              event does, in order.
-    ///   AHEAD   -- its current season runs longer until the host catches up. Nothing that has
+    ///   AHEAD:   its current season runs longer until the host catches up. Nothing that has
     ///              already happened is undone.
     ///   WILDLY OFF (more than MaxYearsBehind years behind, or a year ahead: a load gone wrong
-    ///              rather than drift) -- the calendar is set straight outright.
+    ///              rather than drift): the calendar is set straight outright.
     ///
     /// Also keeps the game running while its window is not in front
     /// (Application.runInBackground), for the length of a session. A game that stops when
@@ -47,8 +47,8 @@ namespace KaCMultiplayer.Net
         private static bool inGame;
 
         /// <summary>
-        /// True from the moment this machine's session is running until its connection goes --
-        /// through menus, which Main.IsSessionRunning is not -- and never while a save is being
+        /// True from the moment this machine's session is running until its connection goes,
+        /// through menus, which Main.IsSessionRunning is not, and never while a save is being
         /// unpacked here. What "the game is actually on" means for anything that must not touch a
         /// world that is about to be replaced (see AiMirror). A guest joining a save has already
         /// unpacked it in the lobby by the time the session runs.

@@ -13,8 +13,8 @@ namespace KaCMultiplayer.Net
     /// AI kingdoms are placed and run on the host only (Main.AIKingdomPlacementHook,
     /// AIKingdomUpdateHook), and none of the host's broadcasts carried them: BuildingWatcher
     /// reports only the host player's own buildings, and PlaceHook stays quiet during an AI tick
-    /// so the AI's buildings are not handed to the host. So a guest had no AI kingdom at all --
-    /// no owner for the island, no castle, nothing -- until a save was loaded.
+    /// so the AI's buildings are not handed to the host. So a guest had no AI kingdom at all,
+    /// no owner for the island, no castle, nothing, until a save was loaded.
     ///
     /// HOST. Every AI building is watched the way BuildingWatcher watches the host's own (called
     /// from the same per-building hook), and sent as an <see cref="AiBuildMessage"/> the first
@@ -23,8 +23,8 @@ namespace KaCMultiplayer.Net
     /// GUEST. The island has to belong to the AI kingdom before its buildings arrive, because a
     /// building takes its colours from its island's owner (Building.Init reads
     /// World.GetLandmassOwner(LandMass()).BuildingMaterial). So a guest with no owner for that
-    /// team makes one -- a bare LandmassOwner with the AI's team and banner, the same component
-    /// vanilla's AI kingdom prefab carries, without the brain -- and gives it the island. Then the
+    /// team makes one, a bare LandmassOwner with the AI's team and banner, the same component
+    /// vanilla's AI kingdom prefab carries, without the brain, and gives it the island. Then the
     /// building is made the way ApplyBuildPlace makes a player's, except that it goes into this
     /// machine's own Player, as an AI building does in vanilla (and as
     /// Main.GetPlayerByBuilding resolves an AI team). After that the same message just updates

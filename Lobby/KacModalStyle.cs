@@ -193,7 +193,7 @@ namespace KaCMultiplayer.Lobby
         /// simple title-and-body layout: the Title and Description nodes sit at whatever fixed
         /// positions the artist put them at, and a caller with its OWN bespoke content (a resource
         /// grid, in ResourcePicker's case) would have that content collide with them. This gives
-        /// just the art -- sprite, type and colour, exactly as the donor drew it -- so a caller can
+        /// just the art, sprite, type and colour, exactly as the donor drew it, so a caller can
         /// apply it to a panel it fully controls the size and children of, and leaves the donor's
         /// Title/Description/Button untouched for whatever the caller does with them separately
         /// (or not at all).
