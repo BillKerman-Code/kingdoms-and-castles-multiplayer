@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -796,32 +796,6 @@ namespace KaCMultiplayer.Net
             return team == lo ? hi : lo;
         }
 
-        /// <summary>
-        /// The one announcement both ends of an accepted deal produce: the gold path in the
-        /// Accept case calls it immediately, everything else calls it once
-        /// <see cref="Messages.DealKind.Resolved"/> reports the real amount. Pulled out so the two
-        /// callers cannot drift into saying it two different ways.
-        /// </summary>
-        private static void AnnounceDealAccepted(int acceptorTeam, int otherTeam, int proposer,
-                                                  FreeResourceType resource, int paid, bool wasFighting)
-        {
-            Announce(acceptorTeam, otherTeam, "accepted the deal with",
-                     paid + " " + ResourceLabel(resource) + " paid"
-                     + (wasFighting ? ", the war is over" : ""));
-
-            // Same reasoning as Refuse: only the proposer gets a popup, the acceptor already
-            // knows, they just clicked Accept. acceptorTeam is never the proposer -- ApplyDeal's
-            // Accept case rejects a proposer trying to accept its own deal before this is ever
-            // called -- so it is always who the proposer actually dealt with.
-            if (proposer == MyTeamOrZero())
-            {
-                string byWho = Main.KingdomNameForTeam(acceptorTeam);
-                KaCMultiplayer.Lobby.DealNoticeWindow.ShowResolved("Accepted",
-                    byWho + " accepted your " + paid + " " + ResourceLabel(resource)
-                    + " request." + (wasFighting ? " The war is over." : ""));
-            }
-        }
-
         /// <summary>True when an int off the wire names a resource we are willing to move.</summary>
         private static bool ValidResource(int raw, out FreeResourceType type)
         {
@@ -888,7 +862,7 @@ namespace KaCMultiplayer.Net
         /// </summary>
         private static int TakeFromKingdom(int team, FreeResourceType type, int amount)
         {
-            if (amount <= 0 || type != FreeResourceType.Gold) return 0;
+            if (amount <= 0) return 0;
 
             LandmassOwner owner = World.GetLandmassOwnerByTeamId(team);
             if (owner == null) return 0;
@@ -984,22 +958,6 @@ namespace KaCMultiplayer.Net
             }
 
             return have - left;
-        }
-
-        /// <summary>
-        /// Moves up to <paramref name="amount"/> of a resource between two kingdoms on THIS machine,
-        /// both of whose stores it actually holds (the host dealing with an AI kingdom it runs).
-        /// Gold moves between treasuries; anything else out of one kingdom's public stores and into
-        /// the other's. Whatever the receiver has no room for goes back where it came from, so
-        /// nothing is lost. Returns what actually arrived.
-        /// </summary>
-        internal static int Transfer(LandmassOwner from, LandmassOwner to, FreeResourceType type, int amount)
-        {
-            if (from == null || to == null || amount <= 0) return 0;
-
-            int taken = TakeFromStores(from, type, amount);
-            DeliverTo(to, type, taken);
-            return taken;
         }
 
         /// <summary>

@@ -1,4 +1,4 @@
-using KaCMultiplayer.Lobby;
+﻿using KaCMultiplayer.Lobby;
 using KaCMultiplayer.SaveIo;
 using Assets.Code;
 using Assets.Code.UI;
@@ -208,21 +208,16 @@ namespace KaCMultiplayer
         /// rather than more reading. This flag exists so that run can happen without shipping the
         /// freeze to anybody.
         ///
-        /// WAS ON from 2026-09-15, on the theory that the stall could no longer be silent OR
-        /// fatal: Weather.Update's call to RaiderSystem.OnNewYear is wrapped by
+        /// ON, since 2026-09-15. Weather.Update's call to RaiderSystem.OnNewYear is wrapped by
         /// WeatherUpdateRaidGuardHook, so a THROW there costs one year's raid and writes a full
         /// stack trace instead of wedging the world clock.
         ///
-        /// TURNED BACK OFF 2026-09-17: a live session found the "something worse than throwing"
-        /// this comment warned about. Vikings landed, destroyed several buildings (so the raid
-        /// itself ran and the guard hook was never even hit, meaning it did not throw), and then
-        /// the boat sat at the shore with its troops never disembarking, at the same time a large
-        /// share of the kingdom's own villagers went idle despite open jobs. That is a stall, not
-        /// an exception, so WeatherUpdateRaidGuardHook's try/catch never had anything to catch --
-        /// exactly the "no exception was ever thrown" symptom from the original 2026-09-15 finding,
-        /// reproduced with the safety net in place. Consistent with the original theory that the
-        /// raid sim cannot resolve a target across multiple team-owned landmasses, it just hangs
-        /// mid-resolution instead of crashing.
+        /// One session (2026-09-17, on the community build) found a stall that is not a throw:
+        /// the Vikings landed and burned buildings, then their boat sat at the shore with the
+        /// troops never disembarking while many of that kingdom's villagers went idle. The guard
+        /// cannot catch that. Raids are now run by the host alone and mirrored to guests
+        /// (RaiderSync, RaidLocalIslandsOnlyHook), which removes the machines disagreeing about a
+        /// raid mid-way. If the stall comes back, this is the switch.
         /// </summary>
         public static bool RaidsEnabled = true;
 
@@ -8653,11 +8648,15 @@ namespace KaCMultiplayer
             /// </summary>
             public static bool Prefix()
             {
+                // Single player keeps the game's own behaviour: its menus pause the game.
+                if (!NetClient.client.IsConnected) return true;
                 return !Main.localMenuSpeedChange;
             }
 
             public static void Postfix(int idx)
             {
+                if (!NetClient.client.IsConnected) { knownSpeed = idx; return; }
+
                 // THE PREFIX ABOVE ALREADY SKIPPED THIS CALL, and Harmony still runs a Postfix
                 // when its Prefix returns false, so this still has to check the same flag before
                 // touching anything. Without this, a suppressed menu pause would still record
@@ -8665,8 +8664,6 @@ namespace KaCMultiplayer
                 // clock actually stayed at, which is exactly the kind of lie that made the old
                 // "[SPEED] menu speed kept local" line look like a pause had happened at all.
                 if (Main.localMenuSpeedChange) return;
-
-                if (!NetClient.client.IsConnected) { knownSpeed = idx; return; }
 
                 bool changed = idx != knownSpeed;
                 knownSpeed = idx; // always reflect the speed that was just applied
