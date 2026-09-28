@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.15.6
+
+AI kingdoms, by Bill Kerman:
+- AI kingdoms in multiplayer. The host adds them in the lobby with "Add AI", sets each one's
+  difficulty, and can change its name and flag. A loaded save lists its own AI kingdoms.
+- Players pick their islands first; AI kingdoms settle after everyone has a castle.
+- Every player sees the AI kingdoms' islands, castles, buildings and flags. The AI runs on the host.
+- Ctrl + Shift + D works with AI kingdoms for everyone: alliances, war, peace, tribute and gifts,
+  with the AI's opinion of you shown. Their demands, peace offers and warnings reach every player as
+  popups.
+- Your villagers no longer move into AI houses or take AI jobs, which left AI people frozen and
+  starving.
+
+Also by Bill Kerman:
+- The year and season follow the host, so a menu or lag no longer leaves players years apart.
+- The dragon countdown and the "DRAGON SIGHTED!" banner are the same on every screen.
+- Foreign merchant ships and Viking raids are run by the host and shown the same to everyone.
+  Merchants now visit every player's docks.
+- What is inside warehouses and granaries is the same on every screen.
+- A cleared wolf den disappears on every screen.
+- Allies' land no longer goes back under the fog after loading a save.
+- Joining no longer stalls part way through loading a big save.
+- A save that fails no longer freezes the game. The protection meant to stop this never worked.
+- A player on a different version of the mod is told so when they join, and so is the host.
+- The Ctrl + Shift + D window uses the game's own art.
+- Opening a menu in multiplayer no longer pauses your own game, so you stay in step with everyone
+  else. Single player still pauses.
+
 ## 0.15.5
 
 - Rejoining a game in progress gives you the game you left. A player who rejoined while the host

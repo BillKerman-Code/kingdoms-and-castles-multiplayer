@@ -88,6 +88,12 @@ sides to agree, two seasons' notice for war, demands and offers between kingdoms
 export prices. The windows and popups for these are ours. He also made the merchant arrival banner
 show for other players' ships.
 
+In 0.15.6 he brought AI kingdoms to multiplayer (lobby controls, placement after the players,
+running them on the host and showing them to everyone, and diplomacy with them), and wrote the
+calendar, dragon countdown, merchant, Viking raid, warehouse contents and wolf den sync. He also
+found that the save transfer was queueing the same chunks many times over, and that the guard
+meant to stop a failed save freezing the game had never run.
+
 Networking uses **[RiptideNetworking](https://github.com/RiptideNetworking/Riptide)** by Tom
 Weiland, under the MIT licence, which requires its notice to ship with it; see
 [LICENSE.md](LICENSE.md).

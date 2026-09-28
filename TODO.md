@@ -21,19 +21,12 @@ for players in [KNOWN_ISSUES.md](KNOWN_ISSUES.md); this list is what we intend t
 Everything the game has that a multiplayer session does not have yet. Each one should come back,
 with one machine owning its decisions and the others applying them.
 
-- **AI kingdoms.** `World.PlaceAIs` is refused in a session (`NoAIKingdomsInMultiplayerHook`), so
-  there are no computer kingdoms at all. Bring them back with each AI kingdom simulated by one
-  machine (the host, or whoever owns the landmass) and synced like a player's kingdom. The Hall of
-  Diplomacy and merchant trade below both depend on AI kingdoms existing.
 - **Witch huts.** Switched off because their live sync was unreliable. Turn them back on with their
   spawning owned by one machine, the way wolves are.
-- **The Hall of Diplomacy**, disabled because the game only opens it when AI kingdoms exist.
-  Ctrl + Shift + D stands in for it. Make the real screen open instead.
+- **The Hall of Diplomacy** is not set up for multiplayer. Ctrl + Shift + D stands in for it. Make
+  the real screen work for players and AI kingdoms.
 - **Viking raids run, but the raid system throws and the error is only caught.** The clock no longer
   freezes, but a year can pass with no raid and the cause is still unknown.
-- **Foreign merchants cannot visit another player's docks.** Any merchant heading for a dock outside
-  the local player's landmasses is destroyed. Letting them trade between kingdoms means provisioning
-  them from the right kingdom again.
 
 ## Decisions one machine should make, and currently every machine makes
 
@@ -46,11 +39,6 @@ the kingdom log filter, the pink ships, and the host's lobby screen staying aliv
 
 ## Not synced yet, and each one is a way for two machines to drift apart
 
-- **Building storage contents** (granaries, stores). `EconomySnapshotMessage` exists but nothing
-  ever sends it. Diplomacy tribute works around it by settling on whichever machine answers for the
-  payer. More urgent now that job assignment is owner only (`JobUpdateAssignmentForeignHook`):
-  another player's workplaces get no workers in our copy, so their stores read empty here until
-  the owner's contents are sent.
 - **Villager hunger and health.**
 - **Job assignments.** Decided by the owner only now, but not sent, so another player's workers
   show as idle in our copy.

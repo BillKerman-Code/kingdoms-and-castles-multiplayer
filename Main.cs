@@ -7367,11 +7367,9 @@ namespace KaCMultiplayer
         // below is still worth having, an untradeable merchant is noise either way, but if the
         // visible symptom ever needs explaining again, re-derive it rather than trusting this note.)
         //
-        // Fix: in MP, suppress any foreign merchant not bound for one of the LOCAL player's docks. The
-        // local player's own landmass is iterated in the same ShipSystem.Update loop, so you still get
-        // merchants at your docks at the normal cadence, and every one you see now has
-        // isTargetPlayerDock=true, so the trade UI opens and you can buy/sell. Single-player untouched.
-        // (This is the per-machine "make it work" step; host-authoritative merchant SYNC comes next.)
+        // Now: the host alone creates foreign merchants, for every dock in the world, and tells
+        // every guest (MerchantSync), so every machine sees the same ship, cargo and destination.
+        // A guest's own random merchant is removed before it sails. Single player is untouched.
         [HarmonyPatch(typeof(MerchantShip), "StartSailing")]
         public class MerchantShipStartSailingHook
         {

@@ -1,6 +1,6 @@
 # Known issues
 
-Problems we know about in the current version, **0.15.5**. If you run into one of these, a report is
+Problems we know about in the current version, **0.15.6**. If you run into one of these, a report is
 still useful, especially with your Player.log attached (see the [README](README.md#reporting-a-bug)
 for where to find it). Anything not on this list, please report.
 
@@ -21,19 +21,16 @@ Each entry says what you see, and what to do about it if there is a workaround.
 
 ## Diplomacy and trade
 
-- **The Hall of Diplomacy is disabled in multiplayer**, because the game only opens it when AI
-  kingdoms exist. Use **Ctrl + Shift + D** instead.
-- **Merchants only visit their own kingdom's docks.** A merchant heading for another player's port
-  is removed, so merchant traffic between kingdoms does not happen yet.
+- **The Hall of Diplomacy is not set up for multiplayer.** Use **Ctrl + Shift + D** instead, which
+  covers both players and AI kingdoms.
 
 ## What other players see of your kingdom
 
 These are not synced yet, so the other machines hold their own guess until something corrects it:
 
-- **What is inside your granaries and stores.**
 - **How hungry or healthy your villagers are.**
 - **Which job each of your villagers is doing.** Only your own game puts your villagers to work,
-  so on other players' screens your workplaces show no workers and your stores can look empty.
+  so on other players' screens your workplaces show no workers.
 
 ## Lobby
 
